@@ -1,11 +1,8 @@
 package controllers;
 
-import play.*;
 import play.mvc.*;
-import play.libs.F.*;
 
-import org.codehaus.jackson.*;
-
+import com.fasterxml.jackson.databind.JsonNode; 
 import views.html.*;
 
 import models.*;
@@ -29,6 +26,10 @@ public class Application extends Controller {
         }
         return ok(chatRoom.render(username));
     }
+
+    public static Result chatRoomJs(String username) {
+        return ok(views.js.chatRoom.render(username));
+    }
     
     /**
      * Handle the chat websocket.
@@ -36,12 +37,15 @@ public class Application extends Controller {
     public static WebSocket<JsonNode> chat(final String username) {
         return new WebSocket<JsonNode>() {
             
-            // Called when the Websokcet Handshake is done.
-            public void onReady(WebSocket.In<JsonNode> in, WebSocket.Out<JsonNode> out) {
+            // Called when the Websocket Handshake is done.
+            public void onReady(WebSocket.In<JsonNode> in, WebSocket.Out<JsonNode> out){
                 
                 // Join the chat room.
-                ChatRoom.join(username, in, out);
-                
+                try { 
+                    ChatRoom.join(username, in, out);
+                } catch (Exception ex) {
+                    ex.printStackTrace();
+                }
             }
         };
     }

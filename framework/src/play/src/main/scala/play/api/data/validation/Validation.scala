@@ -1,3 +1,6 @@
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
 package play.api.data.validation
 
 import play.api.data._
@@ -54,11 +57,30 @@ object Constraint {
 
 }
 
-/** Defines a set of built-in constraints. */
+/**
+ * Defines a set of built-in constraints.
+ */
 object Constraints extends Constraints
 
-/** Defines a set of built-in constraints. */
+/**
+ * Defines a set of built-in constraints.
+ */
 trait Constraints {
+
+  /**
+   * Defines an ‘emailAddress’ constraint for `String` values which will validate email addresses.
+   *
+   * '''name'''[constraint.email]
+   * '''error'''[error.email]
+   */
+  private val emailRegex = """^(?!\.)("([^"\r\\]|\\["\r\\])*"|([-a-zA-Z0-9!#$%&'*+/=?^_`{|}~]|(?<!\.)\.)*)(?<!\.)@[a-zA-Z0-9][\w\.-]*[a-zA-Z0-9]\.[a-zA-Z][a-zA-Z\.]*[a-zA-Z]$""".r
+  def emailAddress: Constraint[String] = Constraint[String]("constraint.email") { e =>
+    if (e == null) Invalid(ValidationError("error.email"))
+    else if (e.trim.isEmpty) Invalid(ValidationError("error.email"))
+    else emailRegex.findFirstMatchIn(e)
+      .map(_ => Valid)
+      .getOrElse(Invalid(ValidationError("error.email")))
+  }
 
   /**
    * Defines a ‘required’ constraint for `String` values, i.e. one in which empty strings are invalid.
@@ -66,28 +88,36 @@ trait Constraints {
    * '''name'''[constraint.required]
    * '''error'''[error.required]
    */
-  def nonEmpty = Constraint[String]("constraint.required") { o =>
-    if (o.isEmpty) Invalid(ValidationError("error.required")) else Valid
+  def nonEmpty: Constraint[String] = Constraint[String]("constraint.required") { o =>
+    if (o == null) Invalid(ValidationError("error.required")) else if (o.trim.isEmpty) Invalid(ValidationError("error.required")) else Valid
   }
 
   /**
-   * Defines a minimum value for `Int` values, i.e. the value must be greater than or equal to the constraint parameter
+   * Defines a minimum value for `Ordered` values, by default the value must be greater than or equal to the constraint parameter
    *
    * '''name'''[constraint.min(minValue)]
-   * '''error'''[error.min(minValue)]
+   * '''error'''[error.min(minValue)] or [error.min.strict(minValue)]
    */
-  def min(minValue: Int) = Constraint[Int]("constraint.min", minValue) { o =>
-    if (o >= minValue) Valid else Invalid(ValidationError("error.min", minValue))
+  def min[T](minValue: T, strict: Boolean = false)(implicit ordering: scala.math.Ordering[T]): Constraint[T] = Constraint[T]("constraint.min", minValue) { o =>
+    (ordering.compare(o, minValue).signum, strict) match {
+      case (1, _) | (0, false) => Valid
+      case (_, false) => Invalid(ValidationError("error.min", minValue))
+      case (_, true) => Invalid(ValidationError("error.min.strict", minValue))
+    }
   }
 
   /**
-   * Defines a maximum value constraint for `Int` values, i.e. value must be less than or equal to the constraint parameter
+   * Defines a maximum value for `Ordered` values, by default the value must be less than or equal to the constraint parameter
    *
    * '''name'''[constraint.max(maxValue)]
-   * '''error'''[error.max(maxValue)]
+   * '''error'''[error.max(maxValue)] or [error.max.strict(maxValue)]
    */
-  def max(maxValue: Int) = Constraint[Int]("constraint.max", maxValue) { o =>
-    if (o <= maxValue) Valid else Invalid(ValidationError("error.max", maxValue))
+  def max[T](maxValue: T, strict: Boolean = false)(implicit ordering: scala.math.Ordering[T]): Constraint[T] = Constraint[T]("constraint.max", maxValue) { o =>
+    (ordering.compare(o, maxValue).signum, strict) match {
+      case (-1, _) | (0, false) => Valid
+      case (_, false) => Invalid(ValidationError("error.max", maxValue))
+      case (_, true) => Invalid(ValidationError("error.max.strict", maxValue))
+    }
   }
 
   /**
@@ -96,8 +126,9 @@ trait Constraints {
    * '''name'''[constraint.minLength(length)]
    * '''error'''[error.minLength(length)]
    */
-  def minLength(length: Int) = Constraint[String]("constraint.minLength", length) { o =>
-    if (o.size >= length) Valid else Invalid(ValidationError("error.minLength", length))
+  def minLength(length: Int): Constraint[String] = Constraint[String]("constraint.minLength", length) { o =>
+    require(length >= 0, "string minLength must not be negative")
+    if (o == null) Invalid(ValidationError("error.minLength", length)) else if (o.size >= length) Valid else Invalid(ValidationError("error.minLength", length))
   }
 
   /**
@@ -106,8 +137,9 @@ trait Constraints {
    * '''name'''[constraint.maxLength(length)]
    * '''error'''[error.maxLength(length)]
    */
-  def maxLength(length: Int) = Constraint[String]("constraint.maxLength", length) { o =>
-    if (o.size <= length) Valid else Invalid(ValidationError("error.maxLength", length))
+  def maxLength(length: Int): Constraint[String] = Constraint[String]("constraint.maxLength", length) { o =>
+    require(length >= 0, "string maxLength must not be negative")
+    if (o == null) Invalid(ValidationError("error.maxLength", length)) else if (o.size <= length) Valid else Invalid(ValidationError("error.maxLength", length))
   }
 
   /**
@@ -116,16 +148,24 @@ trait Constraints {
    * '''name'''[constraint.pattern(regex)] or defined by the name parameter.
    * '''error'''[error.pattern(regex)] or defined by the error parameter.
    */
-  def pattern(regex: scala.util.matching.Regex, name: String = "constraint.pattern", error: String = "error.pattern") = Constraint[String](name, regex) { o =>
-    regex.unapplySeq(o).map(_ => Valid).getOrElse(Invalid(ValidationError(error, regex)))
+  def pattern(regex: => scala.util.matching.Regex, name: String = "constraint.pattern", error: String = "error.pattern"): Constraint[String] = Constraint[String](name, () => regex) { o =>
+    require(regex != null, "regex must not be null")
+    require(name != null, "name must not be null")
+    require(error != null, "error must not be null")
+
+    if (o == null) Invalid(ValidationError(error, regex)) else regex.unapplySeq(o).map(_ => Valid).getOrElse(Invalid(ValidationError(error, regex)))
   }
 
 }
 
-/** A validation result. */
-trait ValidationResult
+/**
+ * A validation result.
+ */
+sealed trait ValidationResult
 
-/** Validation was a success. */
+/**
+ * Validation was a success.
+ */
 case object Valid extends ValidationResult
 
 /**
@@ -141,10 +181,12 @@ case class Invalid(errors: Seq[ValidationError]) extends ValidationResult {
    * @param another validation failure
    * @return a new merged `Invalid`
    */
-  def ++(other: Invalid) = Invalid(this.errors ++ other.errors)
+  def ++(other: Invalid): Invalid = Invalid(this.errors ++ other.errors)
 }
 
-/** This object provides helper methods to construct `Invalid` values. */
+/**
+ * This object provides helper methods to construct `Invalid` values.
+ */
 object Invalid {
 
   /**
@@ -165,11 +207,21 @@ object Invalid {
   def apply(error: String, args: Any*): Invalid = Invalid(Seq(ValidationError(error, args: _*)))
 }
 
-/**
- * A validation error.
- *
- * @param message the error message
- * @param args the error message arguments
- */
-case class ValidationError(message: String, args: Any*)
-
+object ParameterValidator {
+  def apply[T](constraints: Iterable[Constraint[T]], optionalParam: Option[T]*) =
+    optionalParam.flatMap {
+      _.map { param =>
+        constraints.flatMap {
+          _(param) match {
+            case i: Invalid => Some(i)
+            case _ => None
+          }
+        }
+      }
+    }.flatten match {
+      case Nil => Valid
+      case invalids => invalids.reduceLeft {
+        (a, b) => a ++ b
+      }
+    }
+}

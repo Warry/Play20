@@ -1,15 +1,13 @@
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
 package play.core.server.websocket
 
+import org.jboss.netty.handler.codec.http.websocketx.{ WebSocketFrame, TextWebSocketFrame, BinaryWebSocketFrame }
+import play.api.libs.iteratee.Input.El
 import org.jboss.netty.buffer.ChannelBuffer
-import org.jboss.netty.channel.Channel
-import java.nio.charset.Charset
-import org.jboss.netty.util.CharsetUtil
 
-class Frame(val finalFragment: Boolean, val rsv: Int, val binaryData: ChannelBuffer) {
-  def getTextData() = { binaryData.toString(CharsetUtil.UTF_8) }
-}
-
-case class FrameFormatter[A](toFrame: A => Frame, fromFrame: PartialFunction[Frame, A]) extends play.api.mvc.WebSocket.FrameFormatter[A] {
+case class FrameFormatter[A](toFrame: A => WebSocketFrame, fromFrame: PartialFunction[WebSocketFrame, A]) extends play.api.mvc.WebSocket.FrameFormatter[A] {
 
   def transform[B](fba: B => A, fab: A => B): FrameFormatter[B] = {
     FrameFormatter[B](
@@ -22,12 +20,41 @@ case class FrameFormatter[A](toFrame: A => Frame, fromFrame: PartialFunction[Fra
 object Frames {
 
   val textFrame = FrameFormatter[String](
-    str => TextFrame(true, 0, str),
-    { case TextFrame(_, _, str) => str })
+    str => new TextWebSocketFrame(true, 0, str),
+    {
+      case frame: TextWebSocketFrame => frame.getText
+    })
 
   val binaryFrame = FrameFormatter[Array[Byte]](
-    bytes => BinaryFrame(true, 0, org.jboss.netty.buffer.ChannelBuffers.wrappedBuffer(bytes)),
-    { case BinaryFrame(_, _, b) => b.array })
+    bytes => new BinaryWebSocketFrame(true, 0, org.jboss.netty.buffer.ChannelBuffers.wrappedBuffer(bytes)),
+    {
+      case frame: BinaryWebSocketFrame => channelBufferToArray(frame.getBinaryData)
+    })
+
+  val mixedFrame = FrameFormatter[Either[String, Array[Byte]]](
+    stringOrBytes => {
+      stringOrBytes.fold(
+        str => new TextWebSocketFrame(true, 0, str),
+        bytes => new BinaryWebSocketFrame(true, 0, org.jboss.netty.buffer.ChannelBuffers.wrappedBuffer(bytes))
+      )
+    },
+    {
+      case frame: TextWebSocketFrame => Left(frame.getText)
+      case frame: BinaryWebSocketFrame => Right(channelBufferToArray(frame.getBinaryData))
+    }
+  )
+
+  private def channelBufferToArray(buffer: ChannelBuffer) = {
+    if (buffer.readableBytes() == buffer.capacity()) {
+      // Use entire backing array
+      buffer.array()
+    } else {
+      // Copy relevant bytes only
+      val bytes = new Array[Byte](buffer.readableBytes())
+      buffer.readBytes(bytes)
+      bytes
+    }
+  }
 
 }
 

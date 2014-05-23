@@ -1,17 +1,21 @@
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
 package play.api
 
-import play.core._
-
-import play.api.mvc._
+import play.utils.Threads
 
 import java.io._
 
-import scala.collection.JavaConverters._
+import scala.util.control.NonFatal
+import javax.xml.parsers.SAXParserFactory
+import org.apache.xerces.impl.Constants
+import javax.xml.XMLConstants
 
-/** Application mode, either `DEV` or `PROD`. */
+/** Application mode, either `DEV`, `TEST`, or `PROD`. */
 object Mode extends Enumeration {
   type Mode = Value
-  val Dev, Prod, Test = Value
+  val Dev, Test, Prod = Value
 }
 
 /**
@@ -25,13 +29,38 @@ object Mode extends Enumeration {
  */
 object Play {
 
+  /*
+   * A general purpose logger for Play. Intended for internal usage.
+   */
+  private[play] val logger = Logger("play")
+
+  /*
+   * We want control over the sax parser used so we specify the factory required explicitly. We know that
+   * SAXParserFactoryImpl will yield a SAXParser having looked at its source code, despite there being
+   * no explicit doco stating this is the case. That said, there does not appear to be any other way than
+   * declaring a factory in order to yield a parser of a specific type.
+   */
+  private[play] val xercesSaxParserFactory =
+    SAXParserFactory.newInstance("org.apache.xerces.jaxp.SAXParserFactoryImpl", Play.getClass.getClassLoader)
+  xercesSaxParserFactory.setFeature(Constants.SAX_FEATURE_PREFIX + Constants.EXTERNAL_GENERAL_ENTITIES_FEATURE, false)
+  xercesSaxParserFactory.setFeature(Constants.SAX_FEATURE_PREFIX + Constants.EXTERNAL_PARAMETER_ENTITIES_FEATURE, false)
+  xercesSaxParserFactory.setFeature(Constants.XERCES_FEATURE_PREFIX + Constants.DISALLOW_DOCTYPE_DECL_FEATURE, true)
+  xercesSaxParserFactory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)
+
+  /*
+   * A parser to be used that is configured to ensure that no schemas are loaded.
+   */
+  private[play] def XML = scala.xml.XML.withSAXParser(xercesSaxParserFactory.newSAXParser())
+
   /**
    * Returns the currently running application, or `null` if not defined.
    */
-  def unsafeApplication = _currentApp
+  def unsafeApplication: Application = _currentApp
 
-  /** Optionally returns the current running application. */
-  def maybeApplication = Option(_currentApp)
+  /**
+   * Optionally returns the current running application.
+   */
+  def maybeApplication: Option[Application] = Option(_currentApp)
 
   /**
    * Implicitly import the current running application in the context.
@@ -39,9 +68,9 @@ object Play {
    * Note that by relying on this, your code will only work properly in
    * the context of a running application.
    */
-  implicit def current = maybeApplication.getOrElse(sys.error("There is no started application"))
+  implicit def current: Application = maybeApplication.getOrElse(sys.error("There is no started application"))
 
-  private[play] var _currentApp: Application = _
+  @volatile private[play] var _currentApp: Application = _
 
   /**
    * Starts this application.
@@ -55,20 +84,29 @@ object Play {
 
     _currentApp = app
 
-    app.plugins.foreach(_.onStart)
+    // Ensure routes are eagerly loaded, so that the reverse routers are correctly initialised before plugins are
+    // started.
+    app.routes
+    Threads.withContextClassLoader(classloader(app)) {
+      app.plugins.foreach(_.onStart())
+    }
 
     app.mode match {
       case Mode.Test =>
-      case mode => Logger("play").info("Application started (" + mode + ")")
+      case mode => logger.info("Application started (" + mode + ")")
     }
 
   }
 
-  /** Stops the current application. */
+  /**
+   * Stops the current application.
+   */
   def stop() {
-    Option(_currentApp).map {
-      _.plugins.foreach { p =>
-        try { p.onStop } catch { case _ => }
+    Option(_currentApp).map { app =>
+      Threads.withContextClassLoader(classloader(app)) {
+        app.plugins.reverse.foreach { p =>
+          try { p.onStop() } catch { case NonFatal(e) => logger.warn("Error stopping plugin", e) }
+        }
       }
     }
     _currentApp = null
@@ -115,7 +153,7 @@ object Play {
    * @param relativePath the relative path of the file to fetch
    * @return a file instance; it is not guaranteed that the file exists
    */
-  def getFile(relativePath: String)(implicit app: Application) = {
+  def getFile(relativePath: String)(implicit app: Application): File = {
     app.getFile(relativePath)
   }
 
@@ -134,31 +172,53 @@ object Play {
     app.getExistingFile(relativePath)
   }
 
-  /** Returns the current application. */
-  def application(implicit app: Application) = app
+  /**
+   * Returns the current application.
+   */
+  def application(implicit app: Application): Application = app
 
-  /** Returns the current application classloader. */
-  def classloader(implicit app: Application) = app.classloader
+  /**
+   * Returns the current application classloader.
+   */
+  def classloader(implicit app: Application): ClassLoader = app.classloader
 
-  /** Returns the current application configuration. */
-  def configuration(implicit app: Application) = app.configuration
+  /**
+   * Returns the current application configuration.
+   */
+  def configuration(implicit app: Application): Configuration = app.configuration
 
-  /** Returns the current application router. */
-  def routes(implicit app: Application) = app.routes
+  /**
+   * Returns the current application router.
+   */
+  def routes(implicit app: Application): Option[play.core.Router.Routes] = app.routes
 
-  /** Returns the current application global settings. */
-  def global(implicit app: Application) = app.global
+  /**
+   * Returns the current application global settings.
+   */
+  def global(implicit app: Application): GlobalSettings = app.global
 
-  /** Returns the current application mode. */
-  def mode(implicit app: Application) = app.mode
+  /**
+   * Returns the current application mode.
+   */
+  def mode(implicit app: Application): Mode.Mode = app.mode
 
-  /** Returns `true` if the current application is `DEV` mode. */
-  def isDev(implicit app: Application) = (app.mode == Mode.Dev)
+  /**
+   * Returns `true` if the current application is `DEV` mode.
+   */
+  def isDev(implicit app: Application): Boolean = (app.mode == Mode.Dev)
 
-  /** Returns `true` if the current application is `PROD` mode. */
-  def isProd(implicit app: Application) = (app.mode == Mode.Prod)
+  /**
+   * Returns `true` if the current application is `PROD` mode.
+   */
+  def isProd(implicit app: Application): Boolean = (app.mode == Mode.Prod)
 
-  /** Returns `true` if the current application is `TEST` mode. */
-  def isTest(implicit app: Application) = (app.mode == Mode.Test)
+  /**
+   * Returns `true` if the current application is `TEST` mode.
+   */
+  def isTest(implicit app: Application): Boolean = (app.mode == Mode.Test)
 
+  /**
+   * Returns the name of the cookie that can be used to permanently set the user's language.
+   */
+  def langCookieName(implicit app: Application): String = app.configuration.getString("application.lang.cookie").getOrElse("PLAY_LANG")
 }

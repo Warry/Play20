@@ -1,6 +1,11 @@
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
 import sbt._
 import Keys._
-import PlayProject._
+import play.PlayScala
+import play.Play.autoImport._
+import PlayKeys._
 
 object ApplicationBuild extends Build {
 
@@ -8,11 +13,14 @@ object ApplicationBuild extends Build {
     val appVersion      = "1.0"
 
     val appDependencies = Seq(
-      // Add your project dependencies here,
+       ws
     )
 
-    val main = PlayProject(appName, appVersion, appDependencies, mainLang = SCALA).settings(
-      // Add your own project settings here      
+    val main = Project(appName, file(".")).enablePlugins(PlayScala).settings(
+      version :=  appVersion, 
+      libraryDependencies ++= appDependencies,      
+      routesImport += "_root_.utils.BindersRoot",
+      routesImport += "utils.Binders"
     )
 
 }

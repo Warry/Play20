@@ -3,6 +3,7 @@ package controllers
 import play.api._
 import play.api.mvc._
 import play.api.data._
+import play.api.data.Forms._
 
 import models._
 import views._
@@ -12,7 +13,7 @@ object Application extends Controller {
   // -- Authentication
 
   val loginForm = Form(
-    of(
+    tuple(
       "email" -> text,
       "password" -> text
     ) verifying ("Invalid email or password", result => result match {
@@ -48,7 +49,7 @@ object Application extends Controller {
 
   // -- Javascript routing
 
-  def javascriptRoutes = Action {
+  def javascriptRoutes = Action { implicit request =>
     import routes.javascript._
     Ok(
       Routes.javascriptRouter("jsRoutes")(
@@ -58,7 +59,7 @@ object Application extends Controller {
         Tasks.renameFolder, Tasks.deleteFolder, Tasks.index,
         Tasks.add, Tasks.update, Tasks.delete
       )
-    ).as("text/javascript") 
+    )
   }
 
 }

@@ -1,17 +1,23 @@
-package sbt
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
+package play
 
-import org.scalatools.testing.{ Event => TEvent, Result => TResult }
+import sbt._
+import sbt.testing.{ Event => TEvent, Status => TStatus }
+import test.SbtOptionalThrowable
 
-private[sbt] class PlayTestListener extends TestsListener {
+private[play] class PlayTestListener extends TestsListener {
 
   private var skipped, errors, passed, failures = 0
 
   private def count(event: TEvent) {
-    event.result match {
-      case TResult.Error => errors += 1
-      case TResult.Success => passed += 1
-      case TResult.Failure => failures += 1
-      case TResult.Skipped => skipped += 1
+    event.status match {
+      case TStatus.Error => errors += 1
+      case TStatus.Success => passed += 1
+      case TStatus.Failure => failures += 1
+      case TStatus.Skipped => skipped += 1
+      case _ => ()
     }
   }
 
@@ -54,13 +60,15 @@ private[sbt] class PlayTestListener extends TestsListener {
           event.detail.foreach(count)
           d match {
             case te: TEvent =>
-              te.result match {
-                case TResult.Success => playReport("test case", "finished, result" -> event.result.get.toString)
-                case TResult.Error | TResult.Failure =>
-                  playReport("test", "failed" -> te.testName, "details" -> (te.error.toString +
-                    "\n" + te.error.getStackTrace.mkString("\n at ", "\n at ", "")))
-                case TResult.Skipped =>
-                  playReport("test", "ignored" -> te.testName)
+              te.status match {
+                case TStatus.Success => playReport("test case", "finished, result" -> event.result.get.toString)
+                case TStatus.Error | TStatus.Failure =>
+                  val e = SbtOptionalThrowable.unapply(te.throwable).getOrElse(new RuntimeException("some unexpected error occurred during test execution"))
+                  playReport("test", "failed" -> te.fullyQualifiedName, "details" -> (e.toString +
+                    "\n" + e.getStackTrace.mkString("\n at ", "\n at ", "")))
+                case TStatus.Skipped =>
+                  playReport("test", "ignored" -> te.fullyQualifiedName)
+                case _ => ()
               }
           }
         }

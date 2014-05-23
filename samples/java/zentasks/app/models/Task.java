@@ -15,7 +15,9 @@ import com.avaje.ebean.*;
 @Entity 
 public class Task extends Model {
 
-    @Id
+    private static final long serialVersionUID = 1L;
+
+	@Id
     public Long id;
     
     @Constraints.Required
@@ -36,13 +38,13 @@ public class Task extends Model {
     
     // -- Queries
     
-    public static Model.Finder<Long,Task> find = new Model.Finder(Long.class, Task.class);
+    public static Model.Finder<Long,Task> find = new Model.Finder<Long,Task>(Long.class, Task.class);
     
     /**
      * Retrieve todo tasks for the user.
      */
     public static List<Task> findTodoInvolving(String user) {
-       return find.join("project")
+       return find.fetch("project")
            .where()
                 .eq("done", false)
                 .eq("project.members.email", user)

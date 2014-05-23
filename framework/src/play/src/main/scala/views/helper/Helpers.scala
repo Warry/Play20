@@ -1,12 +1,17 @@
-import play.api.templates._
+import play.twirl.api._
+
+import scala.language.implicitConversions
 
 import scala.collection.JavaConverters._
 
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
 package views.html.helper {
 
-  case class FieldElements(id: String, field: play.api.data.Field, input: Html, args: Map[Symbol, Any]) {
+  case class FieldElements(id: String, field: play.api.data.Field, input: Html, args: Map[Symbol, Any], lang: play.api.i18n.Lang) {
 
-    def infos: Seq[String] = {
+    def infos(implicit lang: play.api.i18n.Lang): Seq[String] = {
       args.get('_help).map(m => Seq(m.toString)).getOrElse {
         (if (args.get('_showConstraints) match {
           case Some(false) => false
@@ -18,7 +23,7 @@ package views.html.helper {
       }
     }
 
-    def errors: Seq[String] = {
+    def errors(implicit lang: play.api.i18n.Lang): Seq[String] = {
       (args.get('_error) match {
         case Some(Some(play.api.data.FormError(_, message, args))) => Some(Seq(play.api.i18n.Messages(message, args: _*)))
         case _ => None
@@ -36,8 +41,14 @@ package views.html.helper {
       !errors.isEmpty
     }
 
-    def label: Any = {
-      args.get('_label).getOrElse(field.name)
+    def label(implicit lang: play.api.i18n.Lang): Any = {
+      args.get('_label).getOrElse(play.api.i18n.Messages(field.label))
+    }
+
+    def hasName: Boolean = args.get('_name).isDefined
+
+    def name(implicit lang: play.api.i18n.Lang): Any = {
+      args.get('_name).getOrElse(play.api.i18n.Messages(field.label))
     }
 
   }
@@ -48,9 +59,9 @@ package views.html.helper {
 
   object FieldConstructor {
 
-    implicit val defaultField = FieldConstructor(views.html.helper.defaultFieldHandler.f)
+    implicit val defaultField = FieldConstructor(views.html.helper.defaultFieldConstructor.f)
 
-    def apply(f: (FieldElements) => Html): FieldConstructor = new FieldConstructor {
+    def apply(f: FieldElements => Html): FieldConstructor = new FieldConstructor {
       def apply(elts: FieldElements) = f(elts)
     }
 
@@ -59,22 +70,31 @@ package views.html.helper {
 
   }
 
-  object Utils {
-
-    def filter(args: Seq[(Symbol, Any)], keysWithDefault: (Symbol, String)*) = {
-      val keys = keysWithDefault.map(_._1)
-      val (values, remainingArgs) = args.partition(a => keys.contains(a._1))
-      (keysWithDefault.toMap ++ values.map(e => e._1 -> e._2.toString).toMap) -> remainingArgs
-    }
-
-  }
-
   object repeat {
 
-    def apply(field: play.api.data.Field, min: Int = 1)(f: play.api.data.Field => Html) = {
-      (0 until math.max(if (field.indexes.isEmpty) 0 else field.indexes.max + 1, min)).map(i => f(field("[" + i + "]")))
-    }
+    /**
+     * Render a field a repeated number of times.
+     *
+     * Useful for repeated fields in forms.
+     *
+     * @param field The field to repeat.
+     * @param min The minimum number of times the field should be repeated.
+     * @param fieldRenderer A function to render the field.
+     * @return The sequence of rendered fields.
+     */
+    def apply(field: play.api.data.Field, min: Int = 1)(fieldRenderer: play.api.data.Field => Html): Seq[Html] = {
+      val indexes = field.indexes match {
+        case Nil => 0 until min
+        case complete if complete.size >= min => field.indexes
+        case partial =>
+          // We don't have enough elements, append indexes starting from the largest
+          val start = field.indexes.max + 1
+          val needed = min - field.indexes.size
+          field.indexes ++ (start until (start + needed))
+      }
 
+      indexes.map(i => fieldRenderer(field("[" + i + "]")))
+    }
   }
 
   object options {
@@ -83,7 +103,12 @@ package views.html.helper {
     def apply(options: Map[String, String]) = options.toSeq
     def apply(options: java.util.Map[String, String]) = options.asScala.toSeq
     def apply(options: List[String]) = options.map(v => v -> v)
+    def apply(options: java.util.List[String]) = options.asScala.map(v => v -> v)
 
+  }
+
+  object Implicits {
+    implicit def toAttributePair(pair: (String, String)): (Symbol, String) = Symbol(pair._1) -> pair._2
   }
 
 }

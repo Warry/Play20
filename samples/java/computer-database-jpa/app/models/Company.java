@@ -1,12 +1,10 @@
 package models;
 
 import java.util.*;
+
 import javax.persistence.*;
 
-import play.db.ebean.*;
-import play.data.format.*;
 import play.data.validation.*;
-
 import play.db.jpa.*;
 
 /**
@@ -26,7 +24,8 @@ public class Company {
     }
 
     public static Map<String,String> options() {
-        List<Company> companies = JPA.em().createQuery("from Company order by name").getResultList();
+        @SuppressWarnings("unchecked")
+				List<Company> companies = JPA.em().createQuery("from Company order by name").getResultList();
         LinkedHashMap<String,String> options = new LinkedHashMap<String,String>();
         for(Company c: companies) {
             options.put(c.id.toString(), c.name);

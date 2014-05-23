@@ -1,32 +1,27 @@
-package sbt
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
+package play
 
-import Keys._
+import sbt._
+import sbt.Keys._
+import play.PlayImport._
 import PlayKeys._
+import com.typesafe.sbt.SbtNativePackager._
+import com.typesafe.sbt.packager.Keys._
+import play.sbtplugin.ApplicationSecretGenerator
+import com.typesafe.sbt.web.SbtWeb.autoImport._
+import WebKeys._
+import scala.language.postfixOps
+import play.twirl.sbt.Import.TwirlKeys
 
 trait PlaySettings {
-  this: PlayCommands =>
+  this: PlayCommands with PlayPositionMapper with PlayRun with PlaySourceGenerators =>
 
   lazy val defaultJavaSettings = Seq[Setting[_]](
 
-    templatesImport ++= Seq(
-      "models._",
-      "controllers._",
-
-      "java.lang._",
-      "java.util._",
-
-      "scala.collection.JavaConversions._",
-      "scala.collection.JavaConverters._",
-
-      "play.api.i18n.Messages",
-
-      "play.mvc._",
-      "play.data._",
-      "com.avaje.ebean._",
-
-      "play.mvc.Http.Context.Implicit._",
-
-      "views.%format%._"),
+    TwirlKeys.templateImports in Compile ++= defaultJavaTemplateImports,
+    TwirlKeys.templateImports in Test ++= defaultJavaTemplateImports,
 
     routesImport ++= Seq(
       "play.libs.F"
@@ -37,133 +32,269 @@ trait PlaySettings {
   )
 
   lazy val defaultScalaSettings = Seq[Setting[_]](
+    TwirlKeys.templateImports in Compile ++= defaultScalaTemplateImports,
+    TwirlKeys.templateImports in Test ++= defaultScalaTemplateImports
+  )
 
-    templatesImport ++= Seq(
-      "models._",
-      "controllers._",
+  def closureCompilerSettings(optionCompilerOptions: com.google.javascript.jscomp.CompilerOptions) = Seq[Setting[_]](
+    resourceGenerators in Compile <<= JavascriptCompiler(Some(optionCompilerOptions))(Seq(_)),
+    resourceGenerators in Compile <+= LessCompiler,
+    resourceGenerators in Compile <+= CoffeescriptCompiler
+  )
 
-      "play.api.i18n.Messages",
+  /** Ask SBT to manage the classpath for the given configuration. */
+  def manageClasspath(config: Configuration) = managedClasspath in config <<= (classpathTypes in config, update) map { (ct, report) =>
+    Classpaths.managedJars(config, ct, report)
+  }
 
-      "play.api.mvc._",
-      "play.api.data._",
+  lazy val defaultSettings = Defaults.packageTaskSettings(playPackageAssets, playPackageAssetsMappings) ++ Seq[Setting[_]](
 
-      "views.%format%._"))
-
-  lazy val defaultSettings = Seq[Setting[_]](
+    playPlugin := false,
 
     resolvers ++= Seq(
-      Resolver.url("Play Repository", url("http://download.playframework.org/ivy-releases/"))(Resolver.ivyStylePatterns),
-      "Typesafe Repository" at "http://repo.typesafe.com/typesafe/releases/"),
+      "Typesafe Releases Repository" at "http://repo.typesafe.com/typesafe/releases/"
+    ),
 
-    target <<= baseDirectory / "target",
+    target <<= baseDirectory(_ / "target"),
 
-    sourceDirectory in Compile <<= baseDirectory / "app",
-    sourceDirectory in Test <<= baseDirectory / "test",
+    sourceDirectory in Compile <<= baseDirectory(_ / "app"),
+    sourceDirectory in Test <<= baseDirectory(_ / "test"),
 
-    confDirectory <<= baseDirectory / "conf",
+    confDirectory <<= baseDirectory(_ / "conf"),
 
-    resourceDirectory in Compile <<= baseDirectory / "conf",
+    resourceDirectory in Compile <<= baseDirectory(_ / "conf"),
 
-    scalaSource in Compile <<= baseDirectory / "app",
-    scalaSource in Test <<= baseDirectory / "test",
+    scalaSource in Compile <<= baseDirectory(_ / "app"),
+    scalaSource in Test <<= baseDirectory(_ / "test"),
 
-    javaSource in Compile <<= baseDirectory / "app",
-    javaSource in Test <<= baseDirectory / "test",
+    javaSource in Compile <<= baseDirectory(_ / "app"),
+    javaSource in Test <<= baseDirectory(_ / "test"),
 
-    distDirectory <<= baseDirectory / "dist",
+    sourceDirectories in (Compile, TwirlKeys.compileTemplates) := Seq((sourceDirectory in Compile).value),
+    sourceDirectories in (Test, TwirlKeys.compileTemplates) := Seq((sourceDirectory in Test).value),
 
-    libraryDependencies += "play" %% "play" % play.core.PlayVersion.current,
+    javacOptions in (Compile, doc) := List("-encoding", "utf8"),
 
-    libraryDependencies += "play" %% "play-test" % play.core.PlayVersion.current % "test",
+    libraryDependencies <+= (playPlugin) {
+      isPlugin =>
+        val d = "com.typesafe.play" %% "play" % play.core.PlayVersion.current
+        if (isPlugin)
+          d % "provided"
+        else
+          d
+    },
+    libraryDependencies += "com.typesafe.play" %% "play-test" % play.core.PlayVersion.current % "test",
+
+    ivyConfigurations += DocsApplication,
+    libraryDependencies += "com.typesafe.play" %% "play-docs" % play.core.PlayVersion.current % DocsApplication.name,
+    manageClasspath(DocsApplication),
 
     parallelExecution in Test := false,
 
-    testOptions in Test += Tests.Setup { loader =>
-      loader.loadClass("play.api.Logger").getMethod("init", classOf[java.io.File]).invoke(null, new java.io.File("."))
+    fork in Test := true,
+
+    testOptions in Test += Tests.Argument(TestFrameworks.Specs2, "sequential", "true", "junitxml", "console"),
+
+    testOptions in Test += Tests.Argument(TestFrameworks.JUnit, "--ignore-runners=org.specs2.runner.JUnitRunner"),
+
+    // Make sure Specs2 is at the end of the list of test frameworks, so that it gets priority over
+    // JUnit. This is a hack/workaround to prevent Specs2 tests with @RunsWith annotations being
+    // picked up by JUnit. We don't want JUnit to run the tests since JUnit ignores the Specs2
+    // runnner, which means the tests run but their results are ignored by SBT.
+    testFrameworks ~= {
+      tf => tf.filter(_ != TestFrameworks.Specs2).:+(TestFrameworks.Specs2)
     },
-
-    testOptions in Test += Tests.Cleanup { loader =>
-      loader.loadClass("play.api.Logger").getMethod("shutdown").invoke(null)
-    },
-
-    testOptions in Test += Tests.Argument("sequential", "true"),
-
-    testOptions in Test += Tests.Argument("junitxml", "console"),
 
     testListeners <<= (target, streams).map((t, s) => Seq(new eu.henkelmann.sbt.JUnitXmlTestsListener(t.getAbsolutePath, s.log))),
-
-    sourceGenerators in Compile <+= (confDirectory, sourceManaged in Compile, routesImport) map RouteFiles,
-
-    // Adds config/routes to continious triggers
-    watchSources <+= confDirectory map { _ / "routes" },
-
-    sourceGenerators in Compile <+= (sourceDirectory in Compile, sourceManaged in Compile, templatesTypes, templatesImport) map ScalaTemplates,
-
-    // Adds views template to continious triggers
-    watchSources <++= baseDirectory map { path => ((path / "app") ** "*.scala.*").get },
-
-    commands ++= Seq(playCommand, playRunCommand, playStartCommand, playHelpCommand, h2Command, classpathCommand, licenseCommand, computeDependenciesCommand),
-
-    shellPrompt := playPrompt,
-
-    copyResources in Compile <<= (copyResources in Compile, playCopyAssets) map { (r, pr) => r ++ pr },
-
-    mainClass in (Compile, run) := Some(classOf[play.core.server.NettyServer].getName),
-
-    compile in (Compile) <<= PostCompile,
-
-    dist <<= distTask,
 
     testResultReporter <<= testResultReporterTask,
 
     testResultReporterReset <<= testResultReporterResetTask,
 
+    generateReverseRouter := true,
+
+    generateRefReverseRouter := true,
+
+    namespaceReverseRouter := false,
+
+    sourceGenerators in Compile <+= (state, confDirectory, sourceManaged in Compile, routesImport, generateReverseRouter, generateRefReverseRouter, namespaceReverseRouter) map {
+      (s, cd, sm, ri, grr, grrr, nrr) => RouteFiles(s, Seq(cd), sm, ri, grr, grrr, nrr)
+    },
+
+    // Adds config directory's source files to continuous hot reloading
+    watchSources <+= confDirectory map {
+      all => all
+    },
+
+    // Adds app directory's source files to continuous hot reloading
+    watchSources <++= baseDirectory map {
+      path => ((path / "app") ** "*" --- (path / "app/assets") ** "*").get
+    },
+
+    commands ++= Seq(shCommand, playStartCommand, h2Command, classpathCommand, licenseCommand, computeDependenciesCommand),
+
+    // THE `in Compile` IS IMPORTANT!
+    run in Compile <<= playRunSetting,
+
+    shellPrompt := playPrompt,
+
+    mainClass in (Compile, run) := Some("play.core.server.NettyServer"),
+
+    compile in (Compile) <<= PostCompile(scope = Compile),
+
+    compile in Test <<= PostCompile(Test),
+
     computeDependencies <<= computeDependenciesTask,
 
     playVersion := play.core.PlayVersion.current,
 
+    // all dependencies from outside the project (all dependency jars)
+    playDependencyClasspath <<= externalDependencyClasspath in Runtime,
+
+    // all user classes, in this project and any other subprojects that it depends on
+    playReloaderClasspath <<= Classpaths.concatDistinct(exportedProducts in Runtime, internalDependencyClasspath in Runtime),
+
     playCommonClassloader <<= playCommonClassloaderTask,
 
-    playCopyAssets <<= playCopyAssetsTask,
+    playDependencyClassLoader := createURLClassLoader,
+
+    playReloaderClassLoader := createDelegatedResourcesClassLoader,
 
     playCompileEverything <<= playCompileEverythingTask,
 
-    playPackageEverything <<= playPackageEverythingTask,
-
     playReload <<= playReloadTask,
 
-    playStage <<= playStageTask,
-
-    playIntellij <<= playIntellijTask,
-
-    cleanFiles <+= distDirectory,
-
-    resourceGenerators in Compile <+= LessCompiler,
-
-    resourceGenerators in Compile <+= CoffeescriptCompiler,
-
-    resourceGenerators in Compile <+= JavascriptCompiler,
-
-    minify := false,
-
-    ebeanEnabled := false,
-
-    logManager <<= extraLoggers(PlayLogManager.default),
+    sourcePositionMappers += playPositionMapper,
 
     ivyLoggingLevel := UpdateLogging.DownloadOnly,
 
-    playAssetsDirectories := Seq.empty[File],
+    routesImport := Seq("controllers.Assets.Asset"),
 
-    playAssetsDirectories <+= baseDirectory / "public",
+    playMonitoredFiles <<= playMonitoredFilesTask,
 
-    templatesImport := Seq("play.api.templates._", "play.api.templates.PlayMagic._"),
+    playDefaultPort := 9000,
 
-    routesImport := Seq.empty[String],
+    // Default hooks
 
-    templatesTypes := {
-      case "html" => ("play.api.templates.Html", "play.api.templates.HtmlFormat")
-      case "txt" => ("play.api.templates.Txt", "play.api.templates.TxtFormat")
-      case "xml" => ("play.api.templates.Xml", "play.api.templates.XmlFormat")
-    })
+    playRunHooks := Nil,
+
+    playInteractionMode := play.PlayConsoleInteractionMode,
+
+    // Assets
+
+    requireJs := Nil,
+
+    requireJsFolder := "",
+
+    requireJsShim := "",
+
+    requireNativePath := None,
+
+    buildRequire <<= buildRequireTask,
+
+    packageBin in Compile <<= (packageBin in Compile).dependsOn(buildRequire),
+
+    lessEntryPoints <<= (sourceDirectory in Compile)(base => ((base / "assets" ** "*.less") --- base / "assets" ** "_*")),
+    coffeescriptEntryPoints <<= (sourceDirectory in Compile)(base => base / "assets" ** "*.coffee"),
+    javascriptEntryPoints <<= (sourceDirectory in Compile)(base => ((base / "assets" ** "*.js") --- (base / "assets" ** "_*"))),
+
+    lessOptions := Seq.empty[String],
+    coffeescriptOptions := Seq.empty[String],
+    closureCompilerOptions := Seq.empty[String],
+
+    // sbt-web
+    sourceDirectory in Assets := (sourceDirectory in Compile).value / "assets",
+    sourceDirectory in TestAssets := (sourceDirectory in Test).value / "assets",
+
+    jsFilter in Assets := new PatternFilter("""[^_].*\.js""".r.pattern),
+    resourceDirectory in Assets := baseDirectory.value / "public",
+
+    WebKeys.stagingDirectory := WebKeys.stagingDirectory.value / "public",
+
+    playAssetsWithCompilation := {
+      val ignore = ((assets in Assets)?).value
+      (compile in Compile).value
+    },
+
+    // Assets for run mode
+    playPrefixAndAssetsSetting,
+    playAllAssetsSetting,
+    playAssetsClassLoaderSetting,
+    assetsPrefix := "public/",
+
+    // Assets for distribution
+    playPrefixAndPipelineSetting,
+    playPackageAssetsMappingsSetting,
+    artifactClassifier in playPackageAssets := Some("assets"),
+    Keys.artifactName in playPackageAssets := { (_, mid, art) =>
+      val classifier = art.classifier match {
+        case None => ""
+        case Some(c) => "-" + c
+      }
+      art.name + "-" + mid.revision + classifier + "." + art.extension
+    },
+    artifactPath in playPackageAssets := {
+      val sv = ScalaVersion((scalaVersion in Keys.artifactName).value, (scalaBinaryVersion in Keys.artifactName).value)
+      target.value / (Keys.artifactName in playPackageAssets).value(sv, projectID.value, (artifact in playPackageAssets).value)
+    },
+    mappings in Universal += (playPackageAssets.value -> ("lib/" + organization.value + "." + playPackageAssets.value.getName)),
+    scriptClasspath += (organization.value + "." + playPackageAssets.value.getName),
+
+    // Assets for testing
+    public in TestAssets := (public in TestAssets).value / assetsPrefix.value,
+    fullClasspath in Test ++= {
+      val testAssetDirs = ((assets in TestAssets) ?).all(ScopeFilter(inDependencies(ThisProject))).value.flatten
+      testAssetDirs.map(dir => Attributed.blank(dir.getParentFile))
+    },
+
+    // Settings
+
+    devSettings := Nil,
+
+    // Templates
+
+    TwirlKeys.templateImports in Compile ++= defaultTemplateImports,
+    TwirlKeys.templateImports in Test ++= defaultTemplateImports,
+
+    // Native packaging
+
+    sourceDirectory in Universal <<= baseDirectory(_ / "dist"),
+
+    mainClass in Compile := Some("play.core.server.NettyServer"),
+
+    mappings in Universal ++= {
+      val confDirectoryLen = confDirectory.value.getCanonicalPath.length
+      val pathFinder = confDirectory.value ** ("*" -- "routes")
+      pathFinder.get map {
+        confFile: File =>
+          confFile -> ("conf/" + confFile.getCanonicalPath.substring(confDirectoryLen))
+      }
+    },
+
+    mappings in Universal ++= {
+      val docDirectory = (doc in Compile).value
+      val docDirectoryLen = docDirectory.getCanonicalPath.length
+      val pathFinder = docDirectory ** "*"
+      pathFinder.get map {
+        docFile: File =>
+          docFile -> ("share/doc/api/" + docFile.getCanonicalPath.substring(docDirectoryLen))
+      }
+    },
+
+    mappings in Universal ++= {
+      val pathFinder = baseDirectory.value * "README*"
+      pathFinder.get map {
+        readmeFile: File =>
+          readmeFile -> readmeFile.getName
+      }
+    },
+
+    // Adds the Play application directory to the command line args passed to Play
+    bashScriptExtraDefines += "addJava \"-Duser.dir=$(cd \"${app_home}/..\"; pwd -P)\"\n",
+
+    generateSecret <<= ApplicationSecretGenerator.generateSecretTask,
+    updateSecret <<= ApplicationSecretGenerator.updateSecretTask
+
+  )
 
 }

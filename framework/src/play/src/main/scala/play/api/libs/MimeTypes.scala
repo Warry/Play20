@@ -1,6 +1,11 @@
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
 package play.api.libs
 
-/** MIME type utilities. */
+/**
+ * MIME type utilities.
+ */
 object MimeTypes {
 
   /**
@@ -19,8 +24,37 @@ object MimeTypes {
    */
   def forFileName(name: String) = name.split('.').takeRight(1).headOption.flatMap(forExtension(_))
 
-  lazy val types =
+  def types: Map[String, String] = defaultTypes ++ applicationTypes
 
+  /**
+   * Mimetypes defined in the current application, as declared in application.conf
+   */
+  def applicationTypes: Map[String, String] = play.api.Play.maybeApplication.flatMap { application =>
+    application.configuration.getConfig("mimetype").map { config =>
+      config.subKeys.map { key =>
+        (key, config.getString(key))
+      }.collect {
+        case ((key, Some(value))) =>
+          (key, value)
+      }.toMap
+    }
+  }.getOrElse(Map.empty)
+
+  /**
+   * tells you if mimeType is text or not.
+   * Useful to determine whether the charset suffix should be attached to Content-Type or not
+   * @param mimeType mimeType to check
+   * @return true if mimeType is text
+   */
+  def isText(mimeType: String): Boolean = {
+    mimeType.trim match {
+      case text if text.startsWith("text/") => true
+      case text if additionalText.contains(text) => true
+      case _ => false
+    }
+  }
+
+  lazy val defaultTypes =
     """
         3dm=x-world/x-3dmf
         3dmf=x-world/x-3dmf
@@ -94,6 +128,7 @@ object MimeTypes {
         deepv=application/x-deepv
         def=text/plain
         der=application/x-x509-ca-cert
+        dfont=application/x-font-ttf
         dif=video/x-dv
         dir=application/x-director
         divx=video/divx
@@ -114,6 +149,7 @@ object MimeTypes {
         elc=application/x-bytecodeelisp=(compiled=elisp)
         eml=message/rfc822
         env=application/x-envoy
+        eot=application/vnd.ms-fontobject
         eps=application/postscript
         es=application/x-esrehber
         etx=text/x-setext
@@ -251,7 +287,7 @@ object MimeTypes {
         mov=video/quicktime
         movie=video/x-sgi-movie
         mp2=audio/mpeg
-        mp3=audio/mpeg3
+        mp3=audio/mpeg
         mp4=video/mp4
         mpa=audio/mpeg
         mpc=application/x-project
@@ -360,6 +396,7 @@ object MimeTypes {
         rar=application/x-rar-compressed
         ras=application/x-cmu-raster
         rast=image/cmu-raster
+        rdf=application/rdf+xml
         rexx=text/x-scriptrexx
         rf=image/vndrn-realflash
         rgb=image/x-rgb
@@ -440,6 +477,9 @@ object MimeTypes {
         tsp=application/dsptype
         tsv=text/tab-separated-values
         turbot=image/florian
+        tte=application/x-font-ttf
+        ttf=application/x-font-ttf
+        ttl=text/turtle
         txt=text/plain
         uil=text/x-uil
         uni=text/uri-list
@@ -486,6 +526,7 @@ object MimeTypes {
         wmlc=application/vnd.wap.wmlc
         wmls=text/vnd.wap.wmlscript
         wmlsc=application/vnd.wap.wmlscriptc
+        woff=application/font-woff
         word=application/msword
         wp5=application/wordperfect
         wp6=application/wordperfect
@@ -516,8 +557,9 @@ object MimeTypes {
         xlv=application/excel
         xlw=application/excel
         xm=audio/xm
-        xml=text/xml
+        xml=application/xml
         xmz=xgl/movie
+        xpi=application/x-xpinstall
         xpix=application/x-vndls-xpix
         xpm=image/x-xpixmap
         xsr=video/x-amt-showrun
@@ -548,7 +590,7 @@ object MimeTypes {
         ppam=application/vnd.ms-powerpoint.addin.macroEnabled.12
         sldx=application/vnd.openxmlformats-officedocument.presentationml.slide
         sldm=application/vnd.ms-powerpoint.slide.macroEnabled.12
-        thmx=application/vnd.ms-officetheme 
+        thmx=application/vnd.ms-officetheme
         onetoc=application/onenote
         onetoc2=application/onenote
         onetmp=application/onenote
@@ -565,8 +607,14 @@ object MimeTypes {
 
         # Extensions for Mozilla apps (Firefox and friends)
         xpi=application/x-xpinstall
-        
+
     """.split('\n').map(_.trim).filter(_.size > 0).filter(_(0) != '#').map(_.split('=')).map(parts =>
       parts(0) -> parts.drop(1).mkString).toMap
+
+  lazy val additionalText =
+    """
+        application/json
+        application/javascript
+    """.split('\n').map(_.trim).filter(_.size > 0).filter(_(0) != '#')
 
 }

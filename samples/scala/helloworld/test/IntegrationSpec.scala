@@ -1,11 +1,12 @@
-package test
-
 import org.specs2.mutable._
+import org.specs2.runner._
+import org.junit.runner._
 
 import play.api.test._
 import play.api.test.Helpers._
 
-object IntegrationSpec extends Specification {
+@RunWith(classOf[JUnitRunner])
+class IntegrationSpec extends Specification {
   
   "Application" should {
     
@@ -13,8 +14,12 @@ object IntegrationSpec extends Specification {
       running(TestServer(3333), HTMLUNIT) { browser =>
         browser.goTo("http://localhost:3333/")
         
-        browser.$("h1").first.getText must equalTo("Configure your 'Hello world':")
-        
+        browser.waitUntil[Boolean]{
+          browser.pageSource contains ("Hello world")
+        }
+
+        browser.$("h1").first.getText must contain("Configure your 'Hello world':")
+
         browser.$("#name").text("Bob")
         browser.$("#submit").click()
         
@@ -53,7 +58,6 @@ object IntegrationSpec extends Specification {
         browser.$("p.buttons a").click()
         
         browser.$("h1").first.getText must equalTo("Configure your 'Hello world':")
-         
       }
     }
     

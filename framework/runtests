@@ -1,22 +1,51 @@
+#! /bin/bash
+
+# Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+
+unset no_publish
+
+# comma-separated list of scala versions to cross build against
+declare crossbuild="2.11.0"
+
+# process arguments
+declare -a args
+while [[ $# -gt 0 ]] ; do
+  case "$1" in
+    --no-publish) no_publish=1; shift ;;
+    -c|--crossbuild) crossbuild=$2; shift 2;;
+    *) args=("${args[@]}" "$1"); shift ;;
+  esac
+done
+set -- "${args[@]}" # reset "$@"
+
 echo "[info]"
 echo "[info] ---- PLAYFRAMEWORK CORE TEST RUNNER"
 echo "[info]"
 
 set -e
 export CURRENT=`pwd`
-export SCRIPT=`dirname $0`
+export SCRIPT=`dirname "$0"`
 
-cd $SCRIPT
-export PLAY=`pwd`/../play
+cd "$SCRIPT"
+export BUILD=`pwd`/build
 
-./cleanIvyCache
-./build publish-local
+if [ -n "$no_publish" ] ; then
+  echo "[info] Not publishing locally"
+else
+  $BUILD "$@" publish-local
+  for v in ${crossbuild//,/ } ; do
+    echo "[info] Cross building Play against Scala $v"
+    $BUILD "$@" -Dscala.version=$v publish-local
+  done
+fi
+
+$BUILD "$@" test:test
 
 echo "[info]"
-echo "[info] ---- RUNNING FRAMEWORK SPECS"
+echo "[info] ---- SBT PLUGIN TESTS"
 echo "[info]"
 
-./build test
+$BUILD "$@" Sbt-Plugin:scripted
 
 rm -rf ./logs
 
@@ -26,7 +55,8 @@ echo "[info]"
 echo "[info] ---- RUNNING INTEGRATION TEST"
 echo "[info]"
 
-$PLAY clean test
+$BUILD "$@" clean test
+
 cd $CURRENT
 
 cd ./test/integrationtest-java
@@ -35,7 +65,16 @@ echo "[info]"
 echo "[info] ---- RUNNING JAVA INTEGRATION TEST"
 echo "[info]"
 
-$PLAY clean test
+$BUILD "$@" clean test
+if [ ! -f target/junit-running ]
+then
+  echo "[Error]"
+  echo "[Error] ---- Junit tests might not be running"
+  echo "[Error]"
+  exit 1
+fi
+
+
 cd $CURRENT
 
 cd ./test/integrationtest-scala
@@ -44,65 +83,40 @@ echo "[info]"
 echo "[info] ---- RUNNING SCALA INTEGRATION TEST"
 echo "[info]"
 
-$PLAY clean test
+$BUILD "$@" clean test
+cd $CURRENT
+
+echo "[info]"
+echo "[info] ---- RUNNING DOCUMENTATION TESTS"
+echo "[info]"
+
+cd ../documentation
+$BUILD "$@" clean test validate-docs
+cd $CURRENT
+
+echo "[info]"
+echo "[info] ---- TESTING TEMPLATES"
+echo "[info]"
+
+cd ../templates
+$BUILD "$@" testTemplates
 cd $CURRENT
 
 echo "[info]"
 echo "[info] ---- TESTING SAMPLE APPLICATIONS"
 echo "[info]"
 
-echo "[info]"
-echo "[info] ---- TESTING JAVA/HELLOWORLD"
-echo "[info]"
-
-cd ../samples/java/helloworld
-$PLAY clean test
-cd $CURRENT
-
-echo "[info]"
-echo "[info] ---- TESTING JAVA/COMPUTER-DATABASE"
-echo "[info]"
-
-cd ../samples/java/computer-database
-$PLAY clean test
-cd $CURRENT
+x=`find ../samples -name app`
+for i in $(echo $x | tr ";" "\n")
+do
+  echo "[info]"
+  echo "[info] ---- TESTING ${i/app/}"
+  echo "[info]"
+  cd ${i/app/}
+  $BUILD "$@" clean test
+  cd $CURRENT
+done
 
 echo "[info]"
-echo "[info] ---- TESTING JAVA/ZENTASK"
+echo "[info] ALL TESTS PASSED"
 echo "[info]"
-
-cd ../samples/java/zentasks
-$PLAY clean test
-cd $CURRENT
-
-echo "[info]"
-echo "[info] ---- TESTING SCALA/HELLOWORLD"
-echo "[info]"
-
-cd ../samples/scala/helloworld
-$PLAY clean test
-cd $CURRENT
-
-echo "[info]"
-echo "[info] ---- TESTING SCALA/COMPUTER-DATABASE"
-echo "[info]"
-
-cd ../samples/scala/computer-database
-$PLAY clean test
-cd $CURRENT
-
-echo "[info]"
-echo "[info] ---- TESTING SCALA/ZENTASK"
-echo "[info]"
-
-cd ../samples/scala/zentasks
-$PLAY clean test
-cd $CURRENT
-
-echo "[info]"
-echo "[info] ---- TESTING SCALA/PI-CALCULATOR"
-echo "[info]"
-
-cd ../samples/workinprogress/pi-calculator
-$PLAY clean test
-cd $CURRENT

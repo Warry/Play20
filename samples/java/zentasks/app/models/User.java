@@ -7,15 +7,16 @@ import play.db.ebean.*;
 import play.data.format.*;
 import play.data.validation.*;
 
-import com.avaje.ebean.*;
-
 /**
  * User entity managed by Ebean
  */
 @Entity 
+@Table(name="account")
 public class User extends Model {
 
-    @Id
+    private static final long serialVersionUID = 1L;
+
+	@Id
     @Constraints.Required
     @Formats.NonEmpty
     public String email;
@@ -28,7 +29,7 @@ public class User extends Model {
     
     // -- Queries
     
-    public static Model.Finder<String,User> find = new Model.Finder(String.class, User.class);
+    public static Model.Finder<String,User> find = new Model.Finder<String,User>(String.class, User.class);
     
     /**
      * Retrieve all users.

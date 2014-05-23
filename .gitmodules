@@ -1,3 +1,0 @@
-[submodule "documentation/manual"]
-	path = documentation/manual
-	url = git@github.com:playframework/Play20.wiki.git

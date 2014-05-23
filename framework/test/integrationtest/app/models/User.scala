@@ -1,3 +1,6 @@
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
 package models
 
 import play.api.libs.json._
@@ -15,11 +18,11 @@ object Protocol {
             )
         )
 
-        def reads(json: JsValue): User = User(
+        def reads(json: JsValue): JsResult[User] = JsSuccess(User(
             (json \ "id").as[Long],
             (json \ "name").as[String],
             (json \ "favThings").as[List[String]]
-        )
+        ))
 
     }
 

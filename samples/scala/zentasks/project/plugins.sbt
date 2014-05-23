@@ -1,8 +1,12 @@
+// Comment to get more information during initialization
 logLevel := Level.Warn
 
-resolvers ++= Seq(
-    DefaultMavenRepository,
-    "Typesafe Repository" at "http://repo.typesafe.com/typesafe/releases/"
-)
+// The Typesafe repository
+resolvers += "Typesafe repository" at "http://repo.typesafe.com/typesafe/releases/"
 
-addSbtPlugin("play" % "sbt-plugin" % "2.0-RC1-SNAPSHOT")
+// Use the Play sbt plugin for Play projects
+addSbtPlugin("com.typesafe.play" % "sbt-plugin" % System.getProperty("play.version"))
+
+addSbtPlugin("com.typesafe.sbt" % "sbt-less" % "1.0.0-RC2")
+
+addSbtPlugin("com.typesafe.sbt" % "sbt-coffeescript" % "1.0.0-RC2")

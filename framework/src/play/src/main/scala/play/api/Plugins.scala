@@ -1,18 +1,23 @@
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
 package play.api
-
-import play.api.mvc._
 
 /**
  * A Play plugin.
  *
- * You can define a Play plugin this way:
+ * A plugin must define a single argument constructor that accepts an [[play.api.Application]].  For example:
  * {{{
- * class MyPlugin(app: Application) extends Plugin
+ * class MyPlugin(app: Application) extends Plugin {
+ *   override def onStart() = {
+ *     Logger.info("Plugin started!")
+ *   }
+ * }
  * }}}
  *
  * The plugin class must be declared in a play.plugins file available in the classpath root:
  * {{{
- * myapp.MyPlugin:1000
+ * 1000:myapp.MyPlugin
  * }}}
  * The associated int defines the plugin priority.
  */
@@ -32,5 +37,6 @@ trait Plugin {
    * Is the plugin enabled?
    */
   def enabled: Boolean = true
+
 }
 

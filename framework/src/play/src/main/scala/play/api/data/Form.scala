@@ -1,7 +1,12 @@
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
 package play.api.data
 
+import scala.language.existentials
+
 import format._
-import validation._
+import play.api.data.validation._
 
 /**
  * Helper to manage HTML form description, submission and validation.
@@ -9,14 +14,15 @@ import validation._
  * For example, a form handling a `User` case class submission:
  * {{{
  * import play.api.data._
+ * import play.api.data.Forms._
  * import play.api.data.format.Formats._
  *
  * val userForm = Form(
- *   of(User.apply _, User.unapply _)(
+ *   mapping(
  *     "name" -> of[String],
  *     "age" -> of[Int],
  *     "email" -> of[String]
- *   )
+ *   )(User.apply)(User.unapply)
  * )
  * }}}
  *
@@ -28,14 +34,16 @@ import validation._
  */
 case class Form[T](mapping: Mapping[T], data: Map[String, String], errors: Seq[FormError], value: Option[T]) {
 
-  /** Constraints associated with this form, indexed by field name. */
-  val constraints: Map[String, List[(String, Seq[Any])]] = mapping.mappings.map { m =>
-    m.key -> m.constraints.collect { case Constraint(Some(name), args) => name -> args }.toSeq
-  }.collect {
-    case (k, c @ List(_, _*)) => k -> c
-  }.toMap
+  /**
+   * Constraints associated with this form, indexed by field name.
+   */
+  val constraints: Map[String, Seq[(String, Seq[Any])]] = mapping.mappings.map { m =>
+    m.key -> m.constraints.collect { case Constraint(Some(name), args) => name -> args }
+  }.filterNot(_._2.isEmpty).toMap
 
-  /** Formats associated to this form, indexed by field name. */
+  /**
+   * Formats associated to this form, indexed by field name. *
+   */
   val formats: Map[String, (String, Seq[Any])] = mapping.mappings.map { m =>
     m.key -> m.format
   }.collect {
@@ -49,8 +57,16 @@ case class Form[T](mapping: Mapping[T], data: Map[String, String], errors: Seq[F
    * @return a copy of this form, filled with the new data
    */
   def bind(data: Map[String, String]): Form[T] = mapping.bind(data).fold(
-    errors => this.copy(data = data, errors = errors, value = None),
-    value => this.copy(data = data, errors = Nil, value = Some(value)))
+    newErrors => this.copy(data = data, errors = errors ++ newErrors, value = None),
+    value => this.copy(data = data, errors = errors, value = Some(value)))
+
+  /**
+   * Binds data to this form, i.e. handles form submission.
+   *
+   * @param data Json data to submit
+   * @return a copy of this form, filled with the new data
+   */
+  def bind(data: play.api.libs.json.JsValue): Form[T] = bind(FormUtils.fromJson(js = data))
 
   /**
    * Binds request data to this form, i.e. handles form submission.
@@ -58,14 +74,26 @@ case class Form[T](mapping: Mapping[T], data: Map[String, String], errors: Seq[F
    * @return a copy of this form filled with the new data
    */
   def bindFromRequest()(implicit request: play.api.mvc.Request[_]): Form[T] = {
-    val data = (request.body match {
-      case body: play.api.mvc.AnyContent if body.asUrlFormEncoded.isDefined => body.asUrlFormEncoded.get
-      case body: play.api.mvc.AnyContent if body.asMultipartFormData.isDefined => body.asMultipartFormData.get.asUrlFormEncoded
-      case body: Map[String, Seq[String]] => body
-      case body: play.api.mvc.MultipartFormData[_] => body.asUrlFormEncoded
-      case _ => Map.empty[String, Seq[String]]
-    }) ++ request.queryString
-    bind(data.mapValues(_.headOption.getOrElse("")))
+    bindFromRequest {
+      (request.body match {
+        case body: play.api.mvc.AnyContent if body.asFormUrlEncoded.isDefined => body.asFormUrlEncoded.get
+        case body: play.api.mvc.AnyContent if body.asMultipartFormData.isDefined => body.asMultipartFormData.get.asFormUrlEncoded
+        case body: play.api.mvc.AnyContent if body.asJson.isDefined => FormUtils.fromJson(js = body.asJson.get).mapValues(Seq(_))
+        case body: Map[_, _] => body.asInstanceOf[Map[String, Seq[String]]]
+        case body: play.api.mvc.MultipartFormData[_] => body.asFormUrlEncoded
+        case body: play.api.libs.json.JsValue => FormUtils.fromJson(js = body).mapValues(Seq(_))
+        case _ => Map.empty[String, Seq[String]]
+      }) ++ request.queryString
+    }
+  }
+
+  def bindFromRequest(data: Map[String, Seq[String]]): Form[T] = {
+    bind {
+      data.foldLeft(Map.empty[String, String]) {
+        case (s, (key, values)) if key.endsWith("[]") => s ++ values.zipWithIndex.map { case (v, i) => (key.dropRight(2) + "[" + i + "]") -> v }
+        case (s, (key, values)) => s + (key -> values.headOption.getOrElse(""))
+      }
+    }
   }
 
   /**
@@ -74,8 +102,19 @@ case class Form[T](mapping: Mapping[T], data: Map[String, String], errors: Seq[F
    * @param value an existing value of type `T`, used to fill this form
    * @return a copy of this form filled with the new data
    */
-  def fill(value: T) = {
+  def fill(value: T): Form[T] = {
     val result = mapping.unbind(value)
+    this.copy(data = result, value = Some(value))
+  }
+
+  /**
+   * Fills this form with a existing value, and performs a validation.
+   *
+   * @param value an existing value of type `T`, used to fill this form
+   * @return a copy of this form filled with the new data
+   */
+  def fillAndValidate(value: T): Form[T] = {
+    val result = mapping.unbindAndValidate(value)
     this.copy(data = result._1, errors = result._2, value = Some(value))
   }
 
@@ -96,7 +135,10 @@ case class Form[T](mapping: Mapping[T], data: Map[String, String], errors: Seq[F
    * @param success a function to handle form submission success
    * @return a result `R`.
    */
-  def fold[R](hasErrors: (Form[T]) => R, success: (T) => R) = value.map(success(_)).getOrElse(hasErrors(this))
+  def fold[R](hasErrors: Form[T] => R, success: T => R): R = value match {
+    case Some(v) if errors.isEmpty => success(v)
+    case _ => hasErrors(this)
+  }
 
   /**
    * Retrieves a field.
@@ -147,19 +189,81 @@ case class Form[T](mapping: Mapping[T], data: Map[String, String], errors: Seq[F
    */
   def forField[R](key: String)(handler: Field => R): R = handler(this(key))
 
-  /** Returns `true` if there is an error related to this form. */
-  def hasErrors = !errors.isEmpty
+  /**
+   * Returns `true` if there is an error related to this form.
+   */
+  def hasErrors: Boolean = !errors.isEmpty
 
+  /**
+   * Retrieve the first error for this key.
+   *
+   * @param key field name.
+   */
   def error(key: String): Option[FormError] = errors.find(_.key == key)
 
+  /**
+   * Retrieve all errors for this key.
+   *
+   * @param key field name.
+   */
   def errors(key: String): Seq[FormError] = errors.filter(_.key == key)
 
-  /** Returns `true` if there is a global error related to this form. */
-  def hasGlobalErrors = !globalErrors.isEmpty
+  /**
+   * Returns `true` if there is a global error related to this form.
+   */
+  def hasGlobalErrors: Boolean = !globalErrors.isEmpty
 
-  /** Returns the concrete value, if the submission was a success. */
-  def get = value.get
+  /**
+   * Returns the concrete value, if the submission was a success.
+   *
+   * Note that this method fails with an Exception if this form as errors.
+   */
+  def get: T = value.get
 
+  /**
+   * Returns the form errors serialized as Json.
+   */
+  def errorsAsJson(implicit lang: play.api.i18n.Lang): play.api.libs.json.JsValue = {
+
+    import play.api.libs.json._
+
+    Json.toJson(
+      errors.groupBy(_.key).mapValues { errors =>
+        errors.map(e => play.api.i18n.Messages(e.message, e.args: _*))
+      }
+    )
+
+  }
+
+  /**
+   * Adds an error to this form
+   * @param error Error to add
+   * @return a copy of this form with the added error
+   */
+  def withError(error: FormError): Form[T] = this.copy(errors = errors :+ error, value = None)
+
+  /**
+   * Convenient overloaded method adding an error to this form
+   * @param key Key of the field having the error
+   * @param message Error message
+   * @param args Error message arguments
+   * @return a copy of this form with the added error
+   */
+  def withError(key: String, message: String, args: Any*): Form[T] = withError(FormError(key, message, args))
+
+  /**
+   * Adds a global error to this form
+   * @param message Error message
+   * @param args Error message arguments
+   * @return a copy of this form with the added global error
+   */
+  def withGlobalError(message: String, args: Any*): Form[T] = withError(FormError("", message, args))
+
+  /**
+   * Discards this form’s errors
+   * @return a copy of this form without errors
+   */
+  def discardingErrors: Form[T] = this.copy(errors = Seq.empty)
 }
 
 /**
@@ -173,8 +277,10 @@ case class Form[T](mapping: Mapping[T], data: Map[String, String], errors: Seq[F
  */
 case class Field(private val form: Form[_], name: String, constraints: Seq[(String, Seq[Any])], format: Option[(String, Seq[Any])], errors: Seq[FormError], value: Option[String]) {
 
-  /** The field ID - the same as the field name but with '.' replaced by '_'. */
-  lazy val id: String = name.replace('.', '_').replace('[', '_').replace(']', '_')
+  /**
+   * The field ID - the same as the field name but with '.' replaced by '_'.
+   */
+  lazy val id: String = name.replace('.', '_').replace('[', '_').replace("]", "")
 
   /**
    * Returns the first error associated with this field, if it exists.
@@ -188,17 +294,32 @@ case class Field(private val form: Form[_], name: String, constraints: Seq[(Stri
    */
   lazy val hasErrors: Boolean = !errors.isEmpty
 
+  /**
+   * Retrieve a field from the same form, using a key relative to this field key.
+   *
+   * @param key Relative key.
+   */
   def apply(key: String): Field = {
     form(Option(name).filterNot(_.isEmpty).map(_ + (if (key(0) == '[') "" else ".")).getOrElse("") + key)
   }
 
+  /**
+   * Retrieve available indexes defined for this field (if this field is repeated).
+   */
   lazy val indexes: Seq[Int] = {
     RepeatedMapping.indexes(name, form.data)
   }
 
+  /**
+   * The label for the field.  Transforms repeat names from foo[0] etc to foo.0.
+   */
+  lazy val label: String = name.replaceAll("\\[(\\d+)\\]", ".$1")
+
 }
 
-/** Provides a set of operations for creating `Form` values. */
+/**
+ * Provides a set of operations for creating `Form` values.
+ */
 object Form {
 
   /**
@@ -207,10 +328,11 @@ object Form {
    * For example:
    * {{{
    * import play.api.data._
-   * import format.Formats._
+   * import play.api.data.Forms._
+   * import play.api.data.format.Formats._
    *
    * val userForm = Form(
-   *   of(User)(
+   *   tuple(
    *     "name" -> of[String],
    *     "age" -> of[Int],
    *     "email" -> of[String]
@@ -228,8 +350,12 @@ object Form {
    *
    * For example:
    * {{{
+   * import play.api.data._
+   * import play.api.data.Forms._
+   * import play.api.data.format.Formats._
+   *
    * val userForm = Form(
-   *   "user" -> of(User)(
+   *   "user" -> tuple(
    *     "name" -> of[String],
    *     "age" -> of[Int],
    *     "email" -> of[String]
@@ -241,6 +367,27 @@ object Form {
    * @return a form definition
    */
   def apply[T](mapping: (String, Mapping[T])): Form[T] = Form(mapping._2.withPrefix(mapping._1), Map.empty, Nil, None)
+
+}
+
+private[data] object FormUtils {
+
+  import play.api.libs.json._
+
+  def fromJson(prefix: String = "", js: JsValue): Map[String, String] = js match {
+    case JsObject(fields) => {
+      fields.map { case (key, value) => fromJson(Option(prefix).filterNot(_.isEmpty).map(_ + ".").getOrElse("") + key, value) }.foldLeft(Map.empty[String, String])(_ ++ _)
+    }
+    case JsArray(values) => {
+      values.zipWithIndex.map { case (value, i) => fromJson(prefix + "[" + i + "]", value) }.foldLeft(Map.empty[String, String])(_ ++ _)
+    }
+    case JsNull => Map.empty
+    case JsUndefined() => Map.empty
+    case JsBoolean(value) => Map(prefix -> value.toString)
+    case JsNumber(value) => Map(prefix -> value.toString)
+    case JsString(value) => Map(prefix -> value.toString)
+  }
+
 }
 
 /**
@@ -250,25 +397,54 @@ object Form {
  * @param message The form message (often a simple message key needing to be translated).
  * @param args Arguments used to format the message.
  */
-case class FormError(key: String, message: String, args: Seq[Any] = Nil) {
+case class FormError(key: String, messages: Seq[String], args: Seq[Any] = Nil) {
 
-  def withMessage(message: String) = FormError(key, message)
+  def this(key: String, message: String) = this(key, Seq(message), Nil)
+
+  def this(key: String, message: String, args: Seq[Any]) = this(key, Seq(message), args)
+
+  lazy val message = messages.last
+
+  /**
+   * Copy this error with a new Message.
+   *
+   * @param message The new message.
+   */
+  def withMessage(message: String): FormError = FormError(key, message)
+}
+
+object FormError {
+
+  def apply(key: String, message: String) = new FormError(key, message)
+
+  def apply(key: String, message: String, args: Seq[Any]) = new FormError(key, message, args)
 
 }
 
-/** A mapping is a two-way binder to handle a form field. */
+/**
+ * A mapping is a two-way binder to handle a form field.
+ */
 trait Mapping[T] {
+  self =>
 
-  /** The field key. */
+  /**
+   * The field key.
+   */
   val key: String
 
-  /** Sub-mappings (these can be seen as sub-keys). */
+  /**
+   * Sub-mappings (these can be seen as sub-keys).
+   */
   val mappings: Seq[Mapping[_]]
 
-  /** The Format expected for this field, if it exists. */
+  /**
+   * The Format expected for this field, if it exists.
+   */
   val format: Option[(String, Seq[Any])] = None
 
-  /** The constraints associated with this field. */
+  /**
+   * The constraints associated with this field.
+   */
   val constraints: Seq[Constraint[T]]
 
   /**
@@ -283,9 +459,17 @@ trait Mapping[T] {
    * Unbinds this field, i.e. transforms a concrete value to plain data.
    *
    * @param value the value to unbind
-   * @return either the plain data or a set of errors, if the unbinding failed
+   * @return the plain data
    */
-  def unbind(value: T): (Map[String, String], Seq[FormError])
+  def unbind(value: T): Map[String, String]
+
+  /**
+   * Unbinds this field, i.e. transforms a concrete value to plain data, and applies validation.
+   *
+   * @param value the value to unbind
+   * @return the plain data and any errors in the plain data
+   */
+  def unbindAndValidate(value: T): (Map[String, String], Seq[FormError])
 
   /**
    * Constructs a new Mapping based on this one, adding a prefix to the key.
@@ -348,6 +532,15 @@ trait Mapping[T] {
     })
   }
 
+  /**
+   * Transform this Mapping[T] to a Mapping[B].
+   *
+   * @tparam B The type of the new mapping.
+   * @param f1 Transform value of T to a value of B
+   * @param f2 Transform value of B to a value of T
+   */
+  def transform[B](f1: T => B, f2: B => T): Mapping[B] = WrappedMapping(this, f1, f2)
+
   // Internal utilities
 
   protected def addPrefix(prefix: String) = {
@@ -368,8 +561,101 @@ trait Mapping[T] {
 
 }
 
+/**
+ * A mapping wrapping another existing mapping with transformation functions.
+ *
+ * @param wrapped Existing wrapped mapping
+ * @param f1 Transformation function from A to B
+ * @param f2 Transformation function from B to A
+ * @param additionalConstraints Additional constraints of type B
+ */
+case class WrappedMapping[A, B](wrapped: Mapping[A], f1: A => B, f2: B => A, val additionalConstraints: Seq[Constraint[B]] = Nil) extends Mapping[B] {
+
+  /**
+   * The field key.
+   */
+  val key = wrapped.key
+
+  /**
+   * Sub-mappings (these can be seen as sub-keys).
+   */
+  val mappings = wrapped.mappings
+
+  /**
+   * The Format expected for this field, if it exists.
+   */
+  override val format = wrapped.format
+
+  /**
+   * The constraints associated with this field.
+   */
+  val constraints: Seq[Constraint[B]] = additionalConstraints
+
+  /**
+   * Binds this field, i.e. construct a concrete value from submitted data.
+   *
+   * @param data the submitted data
+   * @return either a concrete value of type `B` or a set of errors, if the binding failed
+   */
+  def bind(data: Map[String, String]): Either[Seq[FormError], B] = {
+    wrapped.bind(data).right.map(t => f1(t)).right.flatMap(applyConstraints)
+  }
+
+  /**
+   * Unbinds this field, i.e. transforms a concrete value to plain data.
+   *
+   * @param value the value to unbind
+   * @return the plain data
+   */
+  def unbind(value: B): Map[String, String] = wrapped.unbind(f2(value))
+
+  /**
+   * Unbinds this field, i.e. transforms a concrete value to plain data, and applies validation.
+   *
+   * @param value the value to unbind
+   * @return the plain data and any errors in the plain data
+   */
+  def unbindAndValidate(value: B): (Map[String, String], Seq[FormError]) = {
+    val (data, errors) = wrapped.unbindAndValidate(f2(value))
+    (data, errors ++ collectErrors(value))
+  }
+
+  /**
+   * Constructs a new Mapping based on this one, adding a prefix to the key.
+   *
+   * @param prefix the prefix to add to the key
+   * @return the same mapping, with only the key changed
+   */
+  def withPrefix(prefix: String): Mapping[B] = {
+    copy(wrapped = wrapped.withPrefix(prefix))
+  }
+
+  /**
+   * Constructs a new Mapping based on this one, by adding new constraints.
+   *
+   * For example:
+   * {{{
+   *   import play.api.data._
+   *   import validation.Constraints._
+   *
+   *   Form("phonenumber" -> text.verifying(required) )
+   * }}}
+   *
+   * @param constraints the constraints to add
+   * @return the new mapping
+   */
+  def verifying(constraints: Constraint[B]*): Mapping[B] = copy(additionalConstraints = additionalConstraints ++ constraints)
+
+}
+
+/**
+ * Provides a set of operations related to `RepeatedMapping` values.
+ */
 object RepeatedMapping {
 
+  /**
+   * Computes the available indexes for the given key in this set of data.
+   */
   def indexes(key: String, data: Map[String, String]): Seq[Int] = {
     val KeyPattern = ("^" + java.util.regex.Pattern.quote(key) + """\[(\d+)\].*$""").r
     data.toSeq.collect { case (KeyPattern(index), _) => index.toInt }.sorted.distinct
@@ -377,14 +663,42 @@ object RepeatedMapping {
 
 }
 
+/**
+ * A mapping for repeated elements.
+ *
+ * @param wrapped The wrapped mapping
+ */
 case class RepeatedMapping[T](wrapped: Mapping[T], val key: String = "", val constraints: Seq[Constraint[List[T]]] = Nil) extends Mapping[List[T]] {
 
+  /**
+   * The Format expected for this field, if it exists.
+   */
   override val format: Option[(String, Seq[Any])] = wrapped.format
 
+  /**
+   * Constructs a new Mapping based on this one, by adding new constraints.
+   *
+   * For example:
+   * {{{
+   *   import play.api.data._
+   *   import validation.Constraints._
+   *
+   *   Form("phonenumber" -> text.verifying(required) )
+   * }}}
+   *
+   * @param addConstraints the constraints to add
+   * @return the new mapping
+   */
   def verifying(addConstraints: Constraint[List[T]]*): Mapping[List[T]] = {
     this.copy(constraints = constraints ++ addConstraints.toSeq)
   }
 
+  /**
+   * Binds this field, i.e. construct a concrete value from submitted data.
+   *
+   * @param data the submitted data
+   * @return either a concrete value of type `List[T]` or a set of errors, if the binding failed
+   */
   def bind(data: Map[String, String]): Either[Seq[FormError], List[T]] = {
     val allErrorsOrItems: Seq[Either[Seq[FormError], T]] = RepeatedMapping.indexes(key, data).map(i => wrapped.withPrefix(key + "[" + i + "]").bind(data))
     if (allErrorsOrItems.forall(_.isRight)) {
@@ -394,15 +708,41 @@ case class RepeatedMapping[T](wrapped: Mapping[T], val key: String = "", val con
     }
   }
 
-  def unbind(value: List[T]): (Map[String, String], Seq[FormError]) = {
-    val (datas, errors) = value.zipWithIndex.map { case (t, i) => wrapped.withPrefix(key + "[" + i + "]").unbind(t) }.unzip
+  /**
+   * Unbinds this field, i.e. transforms a concrete value to plain data.
+   *
+   * @param value the value to unbind
+   * @return the plain data
+   */
+  def unbind(value: List[T]): Map[String, String] = {
+    val datas = value.zipWithIndex.map { case (t, i) => wrapped.withPrefix(key + "[" + i + "]").unbind(t) }
+    datas.foldLeft(Map.empty[String, String])(_ ++ _)
+  }
+
+  /**
+   * Unbinds this field, i.e. transforms a concrete value to plain data, and applies validation.
+   *
+   * @param value the value to unbind
+   * @return the plain data and any errors in the plain data
+   */
+  def unbindAndValidate(value: List[T]): (Map[String, String], Seq[FormError]) = {
+    val (datas, errors) = value.zipWithIndex.map { case (t, i) => wrapped.withPrefix(key + "[" + i + "]").unbindAndValidate(t) }.unzip
     (datas.foldLeft(Map.empty[String, String])(_ ++ _), errors.flatten ++ collectErrors(value))
   }
 
+  /**
+   * Constructs a new Mapping based on this one, adding a prefix to the key.
+   *
+   * @param prefix the prefix to add to the key
+   * @return the same mapping, with only the key changed
+   */
   def withPrefix(prefix: String): Mapping[List[T]] = {
     addPrefix(prefix).map(newKey => this.copy(key = newKey)).getOrElse(this)
   }
 
+  /**
+   * Sub-mappings (these can be seen as sub-keys).
+   */
   val mappings: Seq[Mapping[_]] = wrapped.mappings
 
 }
@@ -416,6 +756,9 @@ case class OptionalMapping[T](wrapped: Mapping[T], val constraints: Seq[Constrai
 
   override val format: Option[(String, Seq[Any])] = wrapped.format
 
+  /**
+   * The field key.
+   */
   val key = wrapped.key
 
   /**
@@ -443,18 +786,32 @@ case class OptionalMapping[T](wrapped: Mapping[T], val constraints: Seq[Constrai
    * @return either a concrete value of type `T` or a set of error if the binding failed
    */
   def bind(data: Map[String, String]): Either[Seq[FormError], Option[T]] = {
-    data.get(key).filterNot(_.isEmpty).map(_ => wrapped.bind(data).right.map(Some(_))).getOrElse(Right(None)).right.flatMap(applyConstraints)
+    data.keys.filter(p => p == key || p.startsWith(key + ".") || p.startsWith(key + "[")).map(k => data.get(k).filterNot(_.isEmpty)).collect { case Some(v) => v }.headOption.map { _ =>
+      wrapped.bind(data).right.map(Some(_))
+    }.getOrElse {
+      Right(None)
+    }.right.flatMap(applyConstraints)
   }
 
   /**
    * Unbinds this field, i.e. transforms a concrete value to plain data.
    *
-   * @param value The value to unbind.
-   * @return Either the plain data or a set of error if the unbinding failed.
+   * @param value the value to unbind
+   * @return the plain data
    */
-  def unbind(value: Option[T]): (Map[String, String], Seq[FormError]) = {
+  def unbind(value: Option[T]): Map[String, String] = {
+    value.map(wrapped.unbind).getOrElse(Map.empty)
+  }
+
+  /**
+   * Unbinds this field, i.e. transforms a concrete value to plain data, and applies validation.
+   *
+   * @param value the value to unbind
+   * @return the plain data and any errors in the plain data
+   */
+  def unbindAndValidate(value: Option[T]): (Map[String, String], Seq[FormError]) = {
     val errors = collectErrors(value)
-    value.map(wrapped.unbind(_)).map(r => r._1 -> (r._2 ++ errors)).getOrElse(Map.empty -> errors)
+    value.map(wrapped.unbindAndValidate).map(r => r._1 -> (r._2 ++ errors)).getOrElse(Map.empty -> errors)
   }
 
   /**
@@ -480,6 +837,9 @@ case class OptionalMapping[T](wrapped: Mapping[T], val constraints: Seq[Constrai
  */
 case class FieldMapping[T](val key: String = "", val constraints: Seq[Constraint[T]] = Nil)(implicit val binder: Formatter[T]) extends Mapping[T] {
 
+  /**
+   * The Format expected for this field, if it exists.
+   */
   override val format: Option[(String, Seq[Any])] = binder.format
 
   /**
@@ -524,9 +884,19 @@ case class FieldMapping[T](val key: String = "", val constraints: Seq[Constraint
    * Unbinds this field, i.e. transforms a concrete value to plain data.
    *
    * @param value the value to unbind
-   * @return either the plain data or a set of errors, if unbinding failed
+   * @return the plain data
    */
-  def unbind(value: T): (Map[String, String], Seq[FormError]) = {
+  def unbind(value: T): Map[String, String] = {
+    binder.unbind(key, value)
+  }
+
+  /**
+   * Unbinds this field, i.e. transforms a concrete value to plain data, and applies validation.
+   *
+   * @param value the value to unbind
+   * @return the plain data and any errors in the plain data
+   */
+  def unbindAndValidate(value: T): (Map[String, String], Seq[FormError]) = {
     binder.unbind(key, value) -> collectErrors(value)
   }
 
@@ -545,7 +915,9 @@ case class FieldMapping[T](val key: String = "", val constraints: Seq[Constraint
 
 }
 
-/** Common helper methods for all object mappings - mappings including several fields. */
+/**
+ * Common helper methods for all object mappings - mappings including several fields.
+ */
 trait ObjectMapping {
 
   /**
@@ -571,51 +943,3 @@ trait ObjectMapping {
   }
 
 }
-
-/**
- * Represents an object binding (ie. a binding for several fields).
- *
- * This is used for objects with one field. Other versions exist, e.g. `ObjectMapping2`, `ObjectMapping3`, etc.
- *
- * @tparam T the complex object type
- * @tparam A the first field type
- * @param apply a constructor function that creates a instance of `T` using field `A`
- * @param fa a mapping for field `A`
- * @param constraints constraints associated with this mapping
- */
-
-case class ObjectMapping1[R, A1](apply: Function1[A1, R], unapply: Function1[R, Option[(A1)]], f1: (String, Mapping[A1]), val key: String = "", val constraints: Seq[Constraint[R]] = Nil) extends Mapping[R] with ObjectMapping {
-
-  val field1 = f1._2.withPrefix(f1._1).withPrefix(key)
-
-  def bind(data: Map[String, String]) = {
-    merge(field1.bind(data)) match {
-      case Left(errors) => Left(errors)
-      case Right(values) => {
-        applyConstraints(apply(
-
-          values(0).asInstanceOf[A1]))
-      }
-    }
-  }
-
-  def unbind(value: R) = {
-    unapply(value).map { fields =>
-      val (v1) = fields
-      val a1 = field1.unbind(v1)
-
-      (a1._1) ->
-        (a1._2)
-    }.getOrElse(Map.empty -> Seq(FormError(key, "unbind.failed")))
-  }
-
-  def withPrefix(prefix: String) = addPrefix(prefix).map(newKey => this.copy(key = newKey)).getOrElse(this)
-
-  def verifying(addConstraints: Constraint[R]*) = {
-    this.copy(constraints = constraints ++ addConstraints.toSeq)
-  }
-
-  val mappings = Seq(this) ++ field1.mappings
-
-}
-

@@ -1,453 +1,405 @@
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
 import sbt._
 import Keys._
+import com.typesafe.tools.mima.plugin.MimaPlugin.mimaDefaultSettings
+import com.typesafe.tools.mima.plugin.MimaKeys.{previousArtifact, binaryIssueFilters}
+import com.typesafe.tools.mima.core._
+import com.typesafe.sbt.SbtScalariform.defaultScalariformSettings
+import scala.util.Properties.isJavaAtLeast
+import play.twirl.sbt.SbtTwirl
+import play.twirl.sbt.Import.TwirlKeys
+
+object BuildSettings {
+  import Resolvers._
+
+  def propOr(name: String, value: String): String =
+    (sys.props get name) orElse
+    (sys.env get name) getOrElse
+    value
+
+  def boolProp(name: String, default: Boolean = false): Boolean =
+    (sys.props get name) orElse
+    (sys.env get name) filter
+    (x => x == "true" || x == "") map
+    (_ => true) getOrElse default
+
+  val experimental = Option(System.getProperty("experimental")).exists(_ == "true")
+
+  val buildOrganization = "com.typesafe.play"
+  val buildVersion = propOr("play.version", "2.3-SNAPSHOT")
+  val buildWithDoc = boolProp("generate.doc")
+  val previousVersion = "2.1.0"
+  // Libraries that are not Scala libraries or are SBT libraries should not be published if the binary
+  // version doesn't match this.
+  val publishForScalaBinaryVersion = "2.10"
+  val defaultScalaVersion = "2.10.4"
+  val buildScalaVersion = propOr("scala.version", defaultScalaVersion)
+  // TODO - Try to compute this from SBT... or not.
+  val buildScalaVersionForSbt = propOr("play.sbt.scala.version", defaultScalaVersion)
+  val buildScalaBinaryVersionForSbt = CrossVersion.binaryScalaVersion(buildScalaVersionForSbt)
+  val buildSbtVersion = propOr("play.sbt.version", "0.13.5-RC3")
+  val buildSbtMajorVersion = "0.13"
+  val buildSbtVersionBinaryCompatible = CrossVersion.binarySbtVersion(buildSbtVersion)
+  // Used by api docs generation to link back to the correct branch on GitHub, only when version is a SNAPSHOT
+  val sourceCodeBranch = propOr("git.branch", "master")
+
+  val publishNonCoreScalaLibraries = publishForScalaBinaryVersion == CrossVersion.binaryScalaVersion(buildScalaVersion)
+
+  lazy val PerformanceTest = config("pt") extend(Test)
+
+  val playCommonSettings = Seq(
+    organization := buildOrganization,
+    version := buildVersion,
+    scalaVersion := buildScalaVersion,
+    scalaBinaryVersion := CrossVersion.binaryScalaVersion(buildScalaVersion),
+    ivyLoggingLevel := UpdateLogging.DownloadOnly,
+    javacOptions ++= makeJavacOptions("1.6"),
+    javacOptions in doc := Seq("-source", "1.6"),
+    resolvers ++= playResolvers,
+    fork in Test := true,
+    testListeners in (Test,test) := Nil,
+    javacOptions in Test := { if (isJavaAtLeast("1.8")) makeJavacOptions("1.8") else makeJavacOptions("1.6") },
+    unmanagedSourceDirectories in Test ++= { if (isJavaAtLeast("1.8")) Seq((sourceDirectory in Test).value / "java8") else Nil },
+    testOptions += Tests.Argument(TestFrameworks.JUnit, "-v"),
+    testOptions in Test += Tests.Filter(!_.endsWith("Benchmark")),
+    testOptions in PerformanceTest ~= (_.filterNot(_.isInstanceOf[Tests.Filter]) :+ Tests.Filter(_.endsWith("Benchmark"))),
+    parallelExecution in PerformanceTest := false
+  )
+
+  def makeJavacOptions(version: String) = Seq("-source", version, "-target", version, "-encoding", "UTF-8", "-Xlint:-options")
+
+  val dontPublishSettings = Seq(
+    /**
+     * We actually must publish when doing a publish-local in order to ensure the scala 2.11 build works, very strange
+     * things happen if you set publishArtifact := false, since it still publishes an ivy file when you do a
+     * publish-local, but that ivy file says there's no artifacts.
+     *
+     * So, to disable publishing for the 2.11 build, we simply publish to a dummy repo instead of to the real thing.
+     */
+    publishTo := Some(Resolver.file("Unused transient repository", file("target/unusedrepo")))
+  )
+  val publishSettings = Seq(
+    publishArtifact in packageDoc := buildWithDoc,
+    publishArtifact in (Compile, packageSrc) := true,
+    publishTo := Some(publishingMavenRepository)
+  )
+
+  def PlaySharedJavaProject(name: String, dir: String, testBinaryCompatibility: Boolean = false): Project = {
+    val bcSettings: Seq[Setting[_]] = if (testBinaryCompatibility) {
+      mimaDefaultSettings ++ Seq(previousArtifact := Some(buildOrganization % StringUtilities.normalize(name) % previousVersion))
+    } else Nil
+    Project(name, file("src/" + dir))
+      .configs(PerformanceTest)
+      .settings(inConfig(PerformanceTest)(Defaults.testTasks) : _*)
+      .settings(playCommonSettings: _*)
+      .settings((if (publishNonCoreScalaLibraries) publishSettings else dontPublishSettings): _*)
+      .settings(bcSettings: _*)
+      .settings(
+        scalaVersion := defaultScalaVersion,
+        scalaBinaryVersion := CrossVersion.binaryScalaVersion(defaultScalaVersion),
+        autoScalaLibrary := false,
+        crossPaths := false
+      )
+  }
+
+  def PlayRuntimeProject(name: String, dir: String): Project = {
+    Project(name, file("src/" + dir))
+      .configs(PerformanceTest)
+      .settings(inConfig(PerformanceTest)(Defaults.testTasks) : _*)
+      .settings(playCommonSettings: _*)
+      .settings(publishSettings: _*)
+      .settings(mimaDefaultSettings: _*)
+      .settings(defaultScalariformSettings: _*)
+      .settings(playRuntimeSettings(name): _*)
+  }
+
+  def playRuntimeSettings(name: String): Seq[Setting[_]] = Seq(
+    previousArtifact := Some(buildOrganization %
+      (StringUtilities.normalize(name) + "_" + CrossVersion.binaryScalaVersion(buildScalaVersion)) % previousVersion),
+    scalacOptions ++= Seq("-encoding", "UTF-8", "-Xlint", "-deprecation", "-unchecked", "-feature"),
+    Docs.apiDocsInclude := true
+  )
+
+  def PlaySbtProject(name: String, dir: String): Project = {
+    Project(name, file("src/" + dir))
+      .settings(playCommonSettings: _*)
+      .settings((if (publishNonCoreScalaLibraries) publishSettings else dontPublishSettings): _*)
+      .settings(defaultScalariformSettings: _*)
+      .settings(
+        scalaVersion := buildScalaVersionForSbt,
+        scalaBinaryVersion := CrossVersion.binaryScalaVersion(buildScalaVersionForSbt),
+        scalacOptions ++= Seq("-encoding", "UTF-8", "-Xlint", "-deprecation", "-unchecked"))
+  }
+
+  /**
+   * Adds a set of Scala 2.11 modules to the build.
+   *
+   * Only adds if Scala version is >= 2.11.
+   */
+  def addScalaModules(modules: ModuleID*): Setting[_] = {
+    libraryDependencies := {
+      CrossVersion.partialVersion(scalaVersion.value) match {
+        case Some((2, scalaMajor)) if scalaMajor >= 11 =>
+          libraryDependencies.value ++ modules
+        case _ =>
+          libraryDependencies.value
+      }
+    }
+  }
+
+  val scalaParserCombinators = "org.scala-lang.modules" %% "scala-parser-combinators" % "1.0.1"
+}
+
+object Resolvers {
+
+  import BuildSettings._
+
+  val typesafeReleases = "Typesafe Releases Repository" at "http://repo.typesafe.com/typesafe/releases/"
+  val typesafeSnapshots = "Typesafe Snapshots Repository" at "http://repo.typesafe.com/typesafe/snapshots/"
+  val typesafeIvyReleases = Resolver.url("Typesafe Ivy Releases Repository", url("http://repo.typesafe.com/typesafe/ivy-releases"))(Resolver.ivyStylePatterns)
+  val typesafeIvySnapshots = Resolver.url("Typesafe Ivy Snapshots Repository", url("http://repo.typesafe.com/typesafe/ivy-snapshots"))(Resolver.ivyStylePatterns)
+  val publishTypesafeMavenReleases = "Typesafe Maven Releases Repository for publishing" at "https://private-repo.typesafe.com/typesafe/maven-releases/"
+  val publishTypesafeMavenSnapshots = "Typesafe Maven Snapshots Repository for publishing" at "https://private-repo.typesafe.com/typesafe/maven-snapshots/"
+  val publishTypesafeIvyReleases = Resolver.url("Typesafe Ivy Releases Repository for publishing", url("https://private-repo.typesafe.com/typesafe/ivy-releases/"))(Resolver.ivyStylePatterns)
+  val publishTypesafeIvySnapshots = Resolver.url("Typesafe Ivy Snapshots Repository for publishing", url("https://private-repo.typesafe.com/typesafe/ivy-snapshots/"))(Resolver.ivyStylePatterns)
+
+  val sonatypeSnapshots = "Sonatype snapshots" at "http://oss.sonatype.org/content/repositories/snapshots/"
+  val sbtPluginSnapshots = Resolver.url("sbt plugin snapshots", url("http://repo.scala-sbt.org/scalasbt/sbt-plugin-snapshots"))(Resolver.ivyStylePatterns)
+
+  val isSnapshotBuild = buildVersion.endsWith("SNAPSHOT")
+  val playResolvers = if (isSnapshotBuild) {
+    Seq(typesafeReleases, typesafeIvyReleases, typesafeSnapshots, typesafeIvySnapshots, sonatypeSnapshots, sbtPluginSnapshots)
+  } else {
+    Seq(typesafeReleases, typesafeIvyReleases)
+  }
+  val publishingMavenRepository = if (isSnapshotBuild) publishTypesafeMavenSnapshots else publishTypesafeMavenReleases
+  val publishingIvyRepository = if (isSnapshotBuild) publishTypesafeIvySnapshots else publishTypesafeIvyReleases
+}
+
 
 object PlayBuild extends Build {
 
-    import Resolvers._
-    import Dependencies._
-    import BuildSettings._
-    import Generators._
-    import LocalSBT._
-    import Tasks._
+  import Resolvers._
+  import Dependencies._
+  import BuildSettings._
+  import Generators._
+  import Tasks._
 
-    val typesafeRepo = "http://repo.typesafe.com/typesafe/releases/"
+  lazy val BuildLinkProject = PlaySharedJavaProject("Build-Link", "build-link")
+    .settings(libraryDependencies ++= link)
+    .dependsOn(PlayExceptionsProject)
 
-    lazy val TemplatesProject = Project(
-        "Templates",
-        file("src/templates"),
-        settings = buildSettings ++ Seq(
-            libraryDependencies := templatesDependencies,
-            publishMavenStyle := false,
-            publishTo := Some(playRepository),
-            publishArtifact in (Compile, packageDoc) := false,
-            publishArtifact in (Compile, packageSrc) := false,
-            scalacOptions ++= Seq("-Xlint","-deprecation", "-unchecked","-encoding", "utf8"),
-            javacOptions ++= Seq("-encoding", "utf8"),
-            resolvers ++= Seq(DefaultMavenRepository, typesafe)
-        )
-    ).settings(com.typesafe.sbtscalariform.ScalariformPlugin.defaultScalariformSettings: _*)
+  lazy val RoutesCompilerProject = PlaySbtProject("Routes-Compiler", "routes-compiler")
+    .settings(libraryDependencies ++= routersCompilerDependencies)
 
-    lazy val AnormProject = Project(
-        "Anorm",
-        file("src/anorm"),
-        settings = buildSettings ++ Seq(
-            libraryDependencies := anormDependencies,
-            publishMavenStyle := false,
-            publishTo := Some(playRepository),
-            scalacOptions ++= Seq("-encoding", "utf8"),
-            javacOptions ++= Seq("-encoding", "utf8"),
-            publishArtifact in (Compile, packageDoc) := false,
-            publishArtifact in (Compile, packageSrc) := false
-        )
-    ).settings(com.typesafe.sbtscalariform.ScalariformPlugin.defaultScalariformSettings: _*)
+  lazy val AnormProject = PlayRuntimeProject("Anorm", "anorm")
+    .settings(
+      libraryDependencies ++= anormDependencies,
+      resolvers += sonatypeSnapshots,
+      addScalaModules(scalaParserCombinators)
+    )
 
-    lazy val PlayProject = Project(
-        "Play",
-        file("src/play"),
-        settings = buildSettings ++ Seq(
-            libraryDependencies := runtime,
-            sourceGenerators in Compile <+= sourceManaged in Compile map PlayVersion,
-            publishMavenStyle := false,
-            publishTo := Some(playRepository),
-            scalacOptions ++= Seq("-Xlint","-deprecation", "-unchecked","-encoding", "utf8"),
-            javacOptions ++= Seq("-encoding", "utf8"),
-            publishArtifact in (Compile, packageDoc) := false,
-            publishArtifact in (Compile, packageSrc) := false,
-            resolvers ++= Seq(DefaultMavenRepository, typesafe),
-            sourceGenerators in Compile <+= (dependencyClasspath in TemplatesProject in Runtime, packageBin in TemplatesProject in Compile, scalaSource in Compile, sourceManaged in Compile, streams) map ScalaTemplates,
-            compile in (Compile) <<= PostCompile
-        )
-    ).settings(com.typesafe.sbtscalariform.ScalariformPlugin.defaultScalariformSettings: _*).dependsOn(TemplatesProject, AnormProject)
-    
-    lazy val PlayTestProject = Project(
-      "Play-Test",
-      file("src/play-test"),
-      settings = buildSettings ++ Seq(
-        libraryDependencies := testDependencies,
-        publishMavenStyle := false,
-        publishTo := Some(playRepository),
-        scalacOptions ++= Seq("-deprecation","-Xcheckinit", "-encoding", "utf8"),
-        javacOptions ++= Seq("-encoding", "utf8"),
-        publishArtifact in (Compile, packageDoc) := false,
-        publishArtifact in (Compile, packageSrc) := false,
-        resolvers ++= Seq(DefaultMavenRepository, typesafe)
-      )
-    ).settings(com.typesafe.sbtscalariform.ScalariformPlugin.defaultScalariformSettings: _*).dependsOn(PlayProject)
+  lazy val IterateesProject = PlayRuntimeProject("Play-Iteratees", "iteratees")
+    .settings(libraryDependencies ++= iterateesDependencies)
 
-    lazy val SbtPluginProject = Project(
-      "SBT-Plugin",
-      file("src/sbt-plugin"),
-      settings = buildSettings ++ Seq(
-        sbtPlugin := true,
-        libraryDependencies := sbtDependencies,
-        addSbtPlugin("com.typesafe.sbteclipse" % "sbteclipse-core" % "2.0.0-M3"),
-        unmanagedJars in Compile  ++=  sbtJars,
-        publishMavenStyle := false,
-        publishTo := Some(playRepository),
-        scalacOptions ++= Seq("-Xlint", "-deprecation", "-unchecked","-encoding", "utf8"),
-        javacOptions ++= Seq("-encoding", "utf8"),
-        publishArtifact in (Compile, packageDoc) := false,
-        publishArtifact in (Compile, packageSrc) := false,
-        resolvers ++= Seq(DefaultMavenRepository, typesafe),
-        projectDependencies := Seq(
-          "play" %% "play" % buildVersion notTransitive(),
-          "play" %% "console" % buildVersion notTransitive(),
-          "play" %% "templates" % buildVersion notTransitive()
-        ) 
-      )
-    ).settings(com.typesafe.sbtscalariform.ScalariformPlugin.defaultScalariformSettings: _*).dependsOn(PlayProject, TemplatesProject, ConsoleProject)
+  lazy val FunctionalProject = PlayRuntimeProject("Play-Functional", "play-functional")
 
-    lazy val ConsoleProject = Project(
-      "Console",
-      file("src/console"),
-      settings = buildSettings ++ Seq(
-        libraryDependencies := consoleDependencies,
-        unmanagedJars in Compile  ++=  sbtJars,
-        publishMavenStyle := false,
-        publishTo := Some(playRepository),
-        scalacOptions ++= Seq("-deprecation","-Xcheckinit", "-encoding", "utf8"),
-        javacOptions ++= Seq("-encoding", "utf8"),
-        publishArtifact in (Compile, packageDoc) := false,
-        publishArtifact in (Compile, packageSrc) := false,
-        resolvers ++= Seq(DefaultMavenRepository, typesafe),
-        projectDependencies := Seq("play" %% "play" % buildVersion notTransitive()) 
-      )
-    ).settings(com.typesafe.sbtscalariform.ScalariformPlugin.defaultScalariformSettings: _*).dependsOn(PlayProject)
+  lazy val DataCommonsProject = PlayRuntimeProject("Play-DataCommons", "play-datacommons")
 
-    val Root = Project(
-        "Root",
-        file("."),
-        settings = buildSettings ++ Seq(
-            cleanFiles ++= Seq(file("../dist"), file("../repository/local")),
-            resetRepositoryTask,
-            buildRepositoryTask,
-            distTask,
-            generateAPIDocsTask,
-            publish <<= (publish in PlayProject, publish in TemplatesProject, publish in AnormProject, publish in SbtPluginProject, publish in ConsoleProject, publish in PlayTestProject) map { (_,_,_,_,_,_) => },
-            publishLocal <<= (publishLocal in PlayProject, publishLocal in TemplatesProject, publishLocal in AnormProject, publishLocal in SbtPluginProject, publishLocal in ConsoleProject, publishLocal in PlayTestProject) map { (_,_,_,_,_,_) => }
-        )
-    ).settings(com.typesafe.sbtscalariform.ScalariformPlugin.defaultScalariformSettings: _*)
-     .dependsOn(PlayProject).aggregate(AnormProject, TemplatesProject, PlayProject, SbtPluginProject, ConsoleProject, PlayTestProject)
+  lazy val JsonProject = PlayRuntimeProject("Play-Json", "play-json")
+    .settings(libraryDependencies ++= jsonDependencies)
+    .dependsOn(IterateesProject, FunctionalProject, DataCommonsProject)
 
-    object BuildSettings {
+  lazy val PlayExceptionsProject = PlaySharedJavaProject("Play-Exceptions", "play-exceptions",
+    testBinaryCompatibility = true)
 
-        val buildOrganization = "play"
-        val buildVersion      = "2.0-RC1-SNAPSHOT"
-        val buildScalaVersion = "2.9.1"
-        val buildSbtVersion   = "0.11.2"
+  lazy val PlayProject = PlayRuntimeProject("Play", "play")
+    .enablePlugins(SbtTwirl)
+    .settings(
+      addScalaModules(scalaParserCombinators),
+      libraryDependencies ++= runtime ++ scalacheckDependencies,
+      sourceGenerators in Compile <+= sourceManaged in Compile map PlayVersion(buildScalaVersion),
+      sourceDirectories in (Compile, TwirlKeys.compileTemplates) := (unmanagedSourceDirectories in Compile).value,
+      TwirlKeys.templateImports in Compile += "play.api.templates.PlayMagic._",
+      mappings in (Compile, packageSrc) <++= scalaTemplateSourceMappings,
+      Docs.apiDocsIncludeManaged := true,
+      parallelExecution in Test := false
+    ).dependsOn(BuildLinkProject, PlayExceptionsProject, IterateesProject % "test->test;compile->compile", JsonProject)
 
-        val buildSettings = Defaults.defaultSettings ++ Seq (
-            organization   := buildOrganization,
-            version        := buildVersion,
-            scalaVersion   := buildScalaVersion,
-            logManager <<= extraLoggers(PlayLogManager.default),
-            ivyLoggingLevel := UpdateLogging.DownloadOnly
-        )
+  lazy val PlayJdbcProject = PlayRuntimeProject("Play-JDBC", "play-jdbc")
+    .settings(libraryDependencies ++= jdbcDeps)
+    .dependsOn(PlayProject)
 
-    }
+  lazy val PlayJavaJdbcProject = PlayRuntimeProject("Play-Java-JDBC", "play-java-jdbc")
+    .dependsOn(PlayJdbcProject, PlayJavaProject)
 
-    object LocalSBT {
-
-        import BuildSettings._
-
-        def isJar(f:java.io.File) = f.getName.endsWith(".jar")
-
-        val sbtJars:Seq[java.io.File] = {
-            file("sbt/boot/scala-" + buildScalaVersion + "/org.scala-tools.sbt/sbt/" + buildSbtVersion).listFiles.filter(isJar) ++
-            file("sbt/boot/scala-" + buildScalaVersion + "/org.scala-tools.sbt/sbt/" + buildSbtVersion + "/xsbti").listFiles.filter(isJar) ++
-            Seq(file("sbt/boot/scala-" + buildScalaVersion + "/lib/jline.jar"))
-        }
-
-    }
-
-    object Resolvers {
-        val playLocalRepository = Resolver.file("Play Local Repository", file("../repository/local"))(Resolver.ivyStylePatterns)   
-        val playRepository = Resolver.ssh("Play Repository", "download.playframework.org", "/srv/http/download.playframework.org/htdocs/ivy-releases/")(Resolver.ivyStylePatterns) as("root", new File(System.getProperty("user.home") + "/.ssh/id_rsa"), "") withPermissions("0644")
-        val typesafe = "Typesafe Repository" at typesafeRepo
-    }
-
-    object Dependencies {
-
-        val runtime = Seq(
-            "org.jboss.netty"                   %    "netty"                    %   "3.2.7.Final",
-            "org.slf4j"                         %    "slf4j-api"                %   "1.6.2",
-            "org.slf4j"                         %    "jul-to-slf4j"             %   "1.6.2",
-            "org.slf4j"                         %    "jcl-over-slf4j"           %   "1.6.2",
-            "ch.qos.logback"                    %    "logback-core"             %   "0.9.30",
-            "ch.qos.logback"                    %    "logback-classic"          %   "0.9.30",
-            "com.github.scala-incubator.io"     %%   "scala-io-file"            %   "0.2.0",
-            "com.typesafe.akka"                 %    "akka-actor"               %   "2.0-M2",
-            "com.typesafe.akka"                 %    "akka-slf4j"               %   "2.0-M2",
-            "com.typesafe.config"               %%   "config"                   %   "0.1.6",
-            "org.avaje"                         %    "ebean"                    %   "2.7.3" notTransitive(),
-            "org.hibernate.javax.persistence"   %    "hibernate-jpa-2.0-api"    %   "1.0.1.Final",
-            "com.h2database"                    %    "h2"                       %   "1.3.158",
-            "org.scala-tools"                   %%   "scala-stm"                %   "0.4",
-            "com.jolbox"                        %    "bonecp"                   %   "0.7.1.RELEASE",
-            "org.yaml"                          %    "snakeyaml"                %   "1.9",
-            "org.hibernate"                     %    "hibernate-validator"      %   "4.2.0.Final",
-            "org.springframework"               %    "spring-context"           %   "3.0.7.RELEASE"   notTransitive(),
-            "org.springframework"               %    "spring-core"              %   "3.0.7.RELEASE"   notTransitive(),
-            "org.springframework"               %    "spring-beans"             %   "3.0.7.RELEASE"   notTransitive(),
-            "joda-time"                         %    "joda-time"                %   "2.0",
-            "mysql"                             %    "mysql-connector-java"     %   "5.1.17",
-            "javassist"                         %    "javassist"                %   "3.12.1.GA",
-            "commons-lang"                      %    "commons-lang"             %   "2.6",
-            "com.ning"                          %    "async-http-client"        %   "1.7.0",
-            "oauth.signpost"                    %    "signpost-core"            %   "1.2.1.1",
-            "com.codahale"                      %%   "jerkson"                  %   "0.5.0",
-            "org.reflections"                   %    "reflections"              %   "0.9.5",
-            "javax.servlet"                     %    "javax.servlet-api"        %   "3.0.1",
-            "tyrex"                             %    "tyrex"                    %   "1.0.1",
-            "org.specs2"                        %%   "specs2"                   %   "1.6.1"      %  "test",
-            "com.novocode"                      %    "junit-interface"          %   "0.7"        %  "test"
-        )
-
-        val sbtDependencies = Seq(      
-          "com.typesafe.config"               %%   "config"                   %   "0.1.6",
-      
-          "rhino"                               %    "js"                       %   "1.7R2",
-          "com.google.javascript"               %    "closure-compiler"         %   "r1459",           //notTransitive(),
-          "com.github.scala-incubator.io"       %%   "scala-io-file"            %   "0.2.0",
-          "org.avaje"                           %    "ebean"                    %   "2.7.3",
-          "com.h2database"                      %    "h2"                       %   "1.3.158",
-          "javassist"                           %    "javassist"                %   "3.12.1.GA"
-
-        )
-
-        val consoleDependencies = Seq(
-          "com.github.scala-incubator.io"       %%   "scala-io-file"            %   "0.2.0"
-        )
-
-        val templatesDependencies = Seq(
-            "com.github.scala-incubator.io"     %%   "scala-io-file"            %   "0.2.0",
-            "org.specs2"                        %%   "specs2"                   %   "1.6.1"    %   "test",
-            "org.scala-lang"                    %    "scala-compiler"           %   buildScalaVersion
-        )
-
-        val anormDependencies = Seq(
-            "org.scala-lang"                    %    "scalap"                   %   buildScalaVersion 
-        )
-        
-        val testDependencies = Seq(
-            "org.specs2"                        %%   "specs2"                   %   "1.6.1",
-            "com.novocode"                      %    "junit-interface"          %   "0.7",
-            "fr.javafreelance.fluentlenium"     %    "fluentlenium"             %   "0.5.3"
-        )
-
-    }
-
-    object Generators {
-
-        val PlayVersion = { dir:File =>
-            val file = dir / "PlayVersion.scala"
-            IO.write(file, 
-                """|package play.core
-                   |
-                   |object PlayVersion {
-                   |    val current = "%s"
-                   |}
-                """.stripMargin.format(BuildSettings.buildVersion)
-            )
-            Seq(file)
-        }
-
-    }
-
-    // ----- Post compile
-
-    lazy val PostCompile = (dependencyClasspath in Compile, compile in Compile, classDirectory in Compile) map { (deps,analysis,classes) =>
+  lazy val PlayEbeanProject = PlayRuntimeProject("Play-Java-Ebean", "play-java-ebean")
+    .settings(
+      libraryDependencies ++= ebeanDeps ++ jpaDeps,
+      compile in (Compile) <<= (dependencyClasspath in Compile, compile in Compile, classDirectory in Compile) map {
+        (deps, analysis, classes) =>
 
         // Ebean (really hacky sorry)
+          val cp = deps.map(_.data.toURL).toArray :+ classes.toURL
+          val cl = new java.net.URLClassLoader(cp)
 
-        import java.net._
-
-        val cp = deps.map(_.data.toURL).toArray :+ classes.toURL
-        val cl = new URLClassLoader(cp)
-
-        val t = cl.loadClass("com.avaje.ebean.enhance.agent.Transformer").getConstructor(classOf[Array[URL]], classOf[String]).newInstance(cp, "debug=0").asInstanceOf[AnyRef]
-        val ft = cl.loadClass("com.avaje.ebean.enhance.ant.OfflineFileTransform").getConstructor(
+          val t = cl.loadClass("com.avaje.ebean.enhance.agent.Transformer").getConstructor(classOf[Array[URL]], classOf[String]).newInstance(cp, "debug=0").asInstanceOf[AnyRef]
+          val ft = cl.loadClass("com.avaje.ebean.enhance.ant.OfflineFileTransform").getConstructor(
             t.getClass, classOf[ClassLoader], classOf[String], classOf[String]
-        ).newInstance(t, ClassLoader.getSystemClassLoader, classes.getAbsolutePath, classes.getAbsolutePath).asInstanceOf[AnyRef]
+          ).newInstance(t, ClassLoader.getSystemClassLoader, classes.getAbsolutePath, classes.getAbsolutePath).asInstanceOf[AnyRef]
 
-        ft.getClass.getDeclaredMethod("process", classOf[String]).invoke(ft,"play/db/ebean/**")
+          ft.getClass.getDeclaredMethod("process", classOf[String]).invoke(ft, "play/db/ebean/**")
 
-        analysis
-    }
+          analysis
+      }
+    ).dependsOn(PlayJavaJdbcProject)
 
+  lazy val PlayJpaProject = PlayRuntimeProject("Play-Java-JPA", "play-java-jpa")
+    .settings(libraryDependencies ++= jpaDeps)
+    .dependsOn(PlayJavaJdbcProject)
 
-    object Tasks {
+  lazy val PlayTestProject = PlayRuntimeProject("Play-Test", "play-test")
+    .settings(
+      libraryDependencies ++= testDependencies,
+      parallelExecution in Test := false
+    ).dependsOn(PlayProject)
 
-        import BuildSettings._
+  lazy val PlayJavaProject = PlayRuntimeProject("Play-Java", "play-java")
+    .settings(libraryDependencies ++= javaDeps ++ javaTestDeps)
+    .dependsOn(PlayProject % "compile;test->test")
 
-        // ----- Reset repo
+  lazy val PlayDocsProject = PlayRuntimeProject("Play-Docs", "play-docs")
+    .settings(Docs.settings: _*)
+    .settings(
+      libraryDependencies ++= playDocsDependencies
+    ).dependsOn(PlayProject)
 
-        val resetRepository = TaskKey[File]("reset-repository")
-        val resetRepositoryTask = resetRepository := {
-          val repository = file("../repository/local")
-          IO.createDirectory(repository)
-          repository
-        }
+  import ScriptedPlugin._
 
-        // ----- Generate API docs
+  lazy val SbtPluginProject = PlaySbtProject("SBT-Plugin", "sbt-plugin")
+    .settings(
+      sbtPlugin := true,
+      publishMavenStyle := false,
+      libraryDependencies ++= sbtDependencies,
+      sourceGenerators in Compile <+= sourceManaged in Compile map PlayVersion(buildScalaVersionForSbt),
+      sbtVersion in GlobalScope := buildSbtVersion,
+      sbtBinaryVersion in GlobalScope := buildSbtVersionBinaryCompatible,
+      sbtDependency <<= sbtDependency { dep =>
+        dep.copy(revision = buildSbtVersion)
+      },
+      TaskKey[Unit]("sbtdep") <<= allDependencies map { deps: Seq[ModuleID] =>
+        deps.map { d =>
+          d.organization + ":" + d.name + ":" + d.revision
+        }.sorted.foreach(println)
+      },
+      publishTo := Some(publishingIvyRepository),
+      // Must be false, because due to the way SBT integrates with test libraries, and the way SBT uses Java object
+      // serialisation to communicate with forked processes, and because this plugin will have SBT 0.13 on the forked
+      // processes classpath while it's actually being run by SBT 0.12... if it forks you get serialVersionUID errors.
+      fork in Test := false
+    ).settings(scriptedSettings: _*)
+    .settings(
+      scriptedLaunchOpts <++= (baseDirectory in ThisBuild) { baseDir =>
+        Seq(
+          "-XX:MaxPermSize=384M",
+          "-Dperformance.log=" + new File(baseDir, "target/sbt-repcomile-performance.properties")
+       )
+      }
+    ).dependsOn(BuildLinkProject, PlayExceptionsProject, RoutesCompilerProject)
 
-        val generateAPIDocs = TaskKey[Unit]("api-docs")
-        val generateAPIDocsTask = TaskKey[Unit]("api-docs") <<= (fullClasspath in Compile, compilers, streams) map { (classpath, cs, s) => 
+  lazy val PlayWsProject = PlayRuntimeProject("Play-WS", "play-ws")
+    .settings(
+      libraryDependencies ++= playWsDeps,
+      parallelExecution in Test := false
+    ).dependsOn(PlayProject)
+    .dependsOn(PlayTestProject % "test")
 
-          IO.delete(file("../documentation/api"))
+  lazy val PlayWsJavaProject = PlayRuntimeProject("Play-Java-WS", "play-java-ws")
+      .settings(
+        libraryDependencies ++= playWsDeps,
+        parallelExecution in Test := false
+      ).dependsOn(PlayProject)
+    .dependsOn(PlayWsProject % "test->test;compile->compile", PlayJavaProject)
 
-          // Scaladoc
-          val sourceFiles = (file("src/play/src/main/scala/play/api") ** "*.scala").get ++ (file("src/play/src/main/scala/views") ** "*.scala").get ++ (file("play/target/scala-2.9.1/src_managed/main/views") ** "*.scala").get
-          new Scaladoc(10, cs.scalac)("Play 2.0 Scala API", sourceFiles, classpath.map(_.data), file("../documentation/api/scala"), Nil, s.log)
+  lazy val PlayFiltersHelpersProject = PlayRuntimeProject("Filters-Helpers", "play-filters-helpers")
+    .settings(
+      parallelExecution in Test := false
+    ).dependsOn(PlayProject, PlayTestProject % "test", PlayJavaProject % "test", PlayWsProject % "test")
 
-          // Javadoc
-          val javaSources = file("src/play/src/main/java")
-          val javaApiTarget = file("../documentation/api/java")
-          val javaClasspath = classpath.map(_.data).mkString(":")
-          """javadoc -windowtitle playframework -doctitle Play&nbsp;2.0&nbsp;Java&nbsp;API  -sourcepath %s -d %s -subpackages play -exclude play.api:play.core -classpath %s""".format(javaSources, javaApiTarget, javaClasspath) ! s.log
+  // This project is just for testing Play, not really a public artifact
+  lazy val PlayIntegrationTestProject = PlayRuntimeProject("Play-Integration-Test", "play-integration-test")
+    .settings(
+      parallelExecution in Test := false,
+      libraryDependencies ++= integrationTestDependencies,
+      previousArtifact := None
+    )
+    .dependsOn(PlayProject % "test->test", PlayWsProject, PlayWsJavaProject, PlayTestProject)
+    .dependsOn(PlayFiltersHelpersProject)
+    .dependsOn(PlayJavaProject)
 
-        }
+  lazy val PlayCacheProject = PlayRuntimeProject("Play-Cache", "play-cache")
+    .settings(
+      libraryDependencies ++= playCacheDeps,
+      parallelExecution in Test := false
+    ).dependsOn(PlayProject)
+    .dependsOn(PlayTestProject % "test")
 
-        // ----- Build repo
+  import RepositoryBuilder._
+  lazy val RepositoryProject = Project(
+      "Play-Repository", file("repository"))
+    .settings(dontPublishSettings:_*)
+    .settings(localRepoCreationSettings:_*)
+    .settings(
+      localRepoProjectsPublished <<= (publishedProjects map (publishLocal in _)).dependOn,
+      addProjectsToRepository(publishedProjects),
+      localRepoArtifacts ++= Seq(
+        "org.scala-lang" % "scala-compiler" % BuildSettings.buildScalaVersion % "master",
+        "org.scala-lang" % "jline" % BuildSettings.buildScalaVersion % "master",
+        "org.scala-lang" % "scala-compiler" % BuildSettings.buildScalaVersionForSbt % "master",
+        "org.scala-lang" % "jline" % BuildSettings.buildScalaVersionForSbt % "master",
+        "org.scala-sbt" % "sbt" % BuildSettings.buildSbtVersion,
+        "org.fusesource.jansi" % "jansi" % "1.11" % "master"
+      )
+    )
 
-        val buildRepository = TaskKey[Unit]("build-repository")
-        val buildRepositoryTask = TaskKey[Unit]("build-repository") <<= (resetRepository, update, update in test, publishLocal, scalaVersion, streams) map { (repository, updated, testUpdated, published, scalaVersion, s) =>
+  lazy val publishedProjects = Seq[ProjectReference](
+    PlayProject,
+    BuildLinkProject,
+    AnormProject,
+    IterateesProject,
+    FunctionalProject,
+    DataCommonsProject,
+    JsonProject,
+    RoutesCompilerProject,
+    PlayCacheProject,
+    PlayJdbcProject,
+    PlayJavaProject,
+    PlayJavaJdbcProject,
+    PlayEbeanProject,
+    PlayJpaProject,
+    PlayWsProject,
+    PlayWsJavaProject,
+    SbtPluginProject,
+    PlayTestProject,
+    PlayExceptionsProject,
+    PlayDocsProject,
+    PlayFiltersHelpersProject,
+    PlayIntegrationTestProject
+  )
 
-            def checksum(algo:String)(bytes:Array[Byte]) = {
-                import java.security.MessageDigest
-                val digest = MessageDigest.getInstance(algo)
-                digest.reset()
-                digest.update(bytes)
-                digest.digest().map(0xFF & _).map { "%02x".format(_) }.foldLeft(""){_ + _}
-            }
-
-            def copyWithChecksums(files:(File,File)) {
-                IO.copyFile(files._1, files._2)
-                Seq("md5","sha1").foreach { algo =>
-                    IO.write(file(files._2.getAbsolutePath + "." + algo), checksum(algo)(IO.readBytes(files._2)))
-                }
-            }
-
-            def writeWithChecksums(f:File, content:String) {
-                IO.write(f, content)
-                Seq("md5","sha1").foreach { algo =>
-                    IO.write(file(f.getAbsolutePath + "." + algo), checksum(algo)(content.getBytes))
-                }
-            }
-
-            // Retrieve all ivy files from cache 
-            // (since we cleaned the cache and run update just before, all these dependencies are useful)
-            val ivyFiles = ((repository / "../cache" * "*").filter { d => 
-              d.isDirectory && d.getName != "scala_%s".format(scalaVersion) 
-            } ** "ivy-*.xml").get
-
-            // From the ivy files, deduct the dependencies
-            val dependencies = ivyFiles.map { descriptor =>
-              val organization = descriptor.getParentFile.getParentFile.getName
-              val name = descriptor.getParentFile.getName
-              val version = descriptor.getName.drop(4).dropRight(4)
-              descriptor -> (organization, name, version)
-            }
-
-            // Resolve artifacts for these dependencies (only jars)
-            val dependenciesWithArtifacts = dependencies.map {
-              case (descriptor, (organization, name, version)) => {
-                var jars = (descriptor.getParentFile ** ("*-" + version + ".jar")).get
-                s.log.info("Found dependency %s::%s::%s -> %s".format(
-                  organization, name, version, jars.map(_.getName).mkString(", ")
-                ))
-                (descriptor, jars, (organization, name, version))
-              }
-            }
-
-            // Build the local repository from these informations
-            dependenciesWithArtifacts.foreach { 
-              case (descriptor, jars, (organization, name, version)) => {
-                val dependencyDir = repository / organization / name / version
-                val artifacts = jars.map(j => dependencyDir / j.getParentFile.getName / (j.getName.dropRight(5 + version.size) + ".jar"))
-                val ivy = dependencyDir / "ivys/ivy.xml"
-
-                (Seq(descriptor -> ivy) ++ jars.zip(artifacts)).foreach(copyWithChecksums)
-              }
-            }
-
-        }
-
-        // ----- Dist package
-
-        val dist = TaskKey[File]("dist")
-        val distTask = dist <<= (buildRepository, publish, generateAPIDocs) map { (_,_,_) =>
-
-            import sbt.NameFilter._
-
-            val root = file("..")
-            val packageName = "play-" + buildVersion
-
-            val files = {
-                (root ** "*") --- 
-                (root ** "dist") --- 
-                (root ** "dist" ** "*") --- 
-                (root ** "*.log") --- 
-                (root ** "logs") --- 
-                (root / "repository/cache") --- 
-                (root / "repository/cache" ** "*") --- 
-                (root / "framework/sbt/boot") --- 
-                (root / "framework/sbt/boot" ** "*") ---
-                (root ** "project/project") --- 
-                (root ** "target") --- 
-                (root ** "target" ** "*") --- 
-                (root ** ".*") ---
-                (root ** ".*") ---
-                (root ** ".git" ** "*") ---
-                (root ** "*.lock")
-            }
-
-            val zipFile = root / "dist" / (packageName + ".zip")
-
-            IO.delete(root / "dist")
-            IO.createDirectory(root / "dist")
-            IO.zip(files x rebase(root, packageName), zipFile)
-
-            zipFile
-        }
-
-        // ----- Compile templates
-
-        val ScalaTemplates = { (classpath:Seq[Attributed[File]], templateEngine:File, sourceDirectory:File, generatedDir:File, streams:sbt.std.TaskStreams[sbt.Project.ScopedKey[_]]) =>
-            val classloader = new java.net.URLClassLoader(classpath.map(_.data.toURI.toURL).toArray, this.getClass.getClassLoader)
-            val compiler = classloader.loadClass("play.templates.ScalaTemplateCompiler")
-            val generatedSource = classloader.loadClass("play.templates.GeneratedSource")
-
-            (generatedDir ** "*.template.scala").get.foreach { source =>
-                val constructor = generatedSource.getDeclaredConstructor(classOf[java.io.File])
-                val sync = generatedSource.getDeclaredMethod("sync")
-                val generated = constructor.newInstance(source)
-                try {
-                    sync.invoke(generated)
-                } catch {
-                    case e:java.lang.reflect.InvocationTargetException =>{
-                        val t = e.getTargetException
-                        t.printStackTrace()
-                        throw t
-                    }
-                }
-            }
-
-            (sourceDirectory ** "*.scala.html").get.foreach { template =>
-                val compile = compiler.getDeclaredMethod("compile", classOf[java.io.File], classOf[java.io.File], classOf[java.io.File], classOf[String], classOf[String], classOf[String])
-                try {
-                    compile.invoke(null, template, sourceDirectory, generatedDir, "play.api.templates.Html", "play.api.templates.HtmlFormat", "import play.api.templates._\nimport play.api.templates.PlayMagic._")
-                } catch {
-                    case e:java.lang.reflect.InvocationTargetException => {
-                        streams.log.error("Compilation failed for %s".format(template))
-                        throw e.getTargetException
-                    }
-                }
-            }
-
-            (generatedDir ** "*.scala").get.map(_.getAbsoluteFile)
-        }
-
-    }
-
+  lazy val Root = Project(
+    "Root",
+    file("."))
+    .settings(playCommonSettings: _*)
+    .settings(dontPublishSettings:_*)
+    .settings(
+      concurrentRestrictions in Global += Tags.limit(Tags.Test, 1),
+      libraryDependencies ++= (runtime ++ jdbcDeps),
+      Docs.apiDocsInclude := false,
+      Docs.apiDocsIncludeManaged := false
+    )
+    .aggregate(publishedProjects: _*)
+    .aggregate(RepositoryProject)
 }

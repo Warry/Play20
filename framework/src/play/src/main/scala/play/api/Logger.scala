@@ -1,29 +1,50 @@
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
 package play.api
 
 import org.slf4j.{ LoggerFactory, Logger => Slf4jLogger }
+import scala.util.control.NonFatal
 
-/** Typical logger interface. */
+/**
+ * Typical logger interface.
+ */
 trait LoggerLike {
 
-  /** The underlying SLF4J Logger. */
+  /**
+   * The underlying SLF4J Logger.
+   */
   val logger: Slf4jLogger
 
+  /**
+   * The underlying SLF4J Logger.
+   */
   lazy val underlyingLogger = logger
 
-  /** `true` if the logger instance is enabled for the `TRACE` level. */
-  lazy val isTraceEnabled = logger.isTraceEnabled
+  /**
+   * `true` if the logger instance is enabled for the `TRACE` level.
+   */
+  def isTraceEnabled = logger.isTraceEnabled
 
-  /** `true` if the logger instance is enabled for the `DEBUG` level. */
-  lazy val isDebugEnabled = logger.isDebugEnabled
+  /**
+   * `true` if the logger instance is enabled for the `DEBUG` level.
+   */
+  def isDebugEnabled = logger.isDebugEnabled
 
-  /** `true` if the logger instance is enabled for the `INFO` level. */
-  lazy val isInfoEnabled = logger.isInfoEnabled
+  /**
+   * `true` if the logger instance is enabled for the `INFO` level.
+   */
+  def isInfoEnabled = logger.isInfoEnabled
 
-  /** `true` if the logger instance is enabled for the `WARN` level. */
-  lazy val isWarnEnabled = logger.isWarnEnabled
+  /**
+   * `true` if the logger instance is enabled for the `WARN` level.
+   */
+  def isWarnEnabled = logger.isWarnEnabled
 
-  /** `true` if the logger instance is enabled for the `ERROR` level. */
-  lazy val isErrorEnabled = logger.isWarnEnabled
+  /**
+   * `true` if the logger instance is enabled for the `ERROR` level.
+   */
+  def isErrorEnabled = logger.isErrorEnabled
 
   /**
    * Logs a message with the `TRACE` level.
@@ -31,7 +52,7 @@ trait LoggerLike {
    * @param message the message to log
    */
   def trace(message: => String) {
-    if (isTraceEnabled) logger.trace(message)
+    if (logger.isTraceEnabled) logger.trace(message)
   }
 
   /**
@@ -41,7 +62,7 @@ trait LoggerLike {
    * @param error the associated exception
    */
   def trace(message: => String, error: => Throwable) {
-    if (isTraceEnabled) logger.trace(message, error)
+    if (logger.isTraceEnabled) logger.trace(message, error)
   }
 
   /**
@@ -50,7 +71,7 @@ trait LoggerLike {
    * @param message the message to log
    */
   def debug(message: => String) {
-    if (isDebugEnabled) logger.debug(message)
+    if (logger.isDebugEnabled) logger.debug(message)
   }
 
   /**
@@ -60,7 +81,7 @@ trait LoggerLike {
    * @param error the associated exception
    */
   def debug(message: => String, error: => Throwable) {
-    if (isDebugEnabled) logger.debug(message, error)
+    if (logger.isDebugEnabled) logger.debug(message, error)
   }
 
   /**
@@ -69,7 +90,7 @@ trait LoggerLike {
    * @param message the message to log
    */
   def info(message: => String) {
-    if (isInfoEnabled) logger.info(message)
+    if (logger.isInfoEnabled) logger.info(message)
   }
 
   /**
@@ -79,7 +100,7 @@ trait LoggerLike {
    * @param error the associated exception
    */
   def info(message: => String, error: => Throwable) {
-    if (isInfoEnabled) logger.info(message, error)
+    if (logger.isInfoEnabled) logger.info(message, error)
   }
 
   /**
@@ -88,7 +109,7 @@ trait LoggerLike {
    * @param message the message to log
    */
   def warn(message: => String) {
-    if (isWarnEnabled) logger.warn(message)
+    if (logger.isWarnEnabled) logger.warn(message)
   }
 
   /**
@@ -98,7 +119,7 @@ trait LoggerLike {
    * @param error the associated exception
    */
   def warn(message: => String, error: => Throwable) {
-    if (isWarnEnabled) logger.warn(message, error)
+    if (logger.isWarnEnabled) logger.warn(message, error)
   }
 
   /**
@@ -107,7 +128,7 @@ trait LoggerLike {
    * @param message the message to log
    */
   def error(message: => String) {
-    if (isErrorEnabled) logger.error(message)
+    if (logger.isErrorEnabled) logger.error(message)
   }
 
   /**
@@ -117,7 +138,7 @@ trait LoggerLike {
    * @param error the associated exception
    */
   def error(message: => String, error: => Throwable) {
-    if (isErrorEnabled) logger.error(message, error)
+    if (logger.isErrorEnabled) logger.error(message, error)
   }
 
 }
@@ -145,6 +166,9 @@ class Logger(val logger: Slf4jLogger) extends LoggerLike
  */
 object Logger extends LoggerLike {
 
+  /**
+   * Initialize the Logger in a brut way.
+   */
   def init(home: java.io.File) {
     Logger.configure(
       Map("application.home" -> home.getAbsolutePath),
@@ -176,8 +200,9 @@ object Logger extends LoggerLike {
   /**
    * Reconfigures the underlying logback infrastructure.
    *
-   * @param configFile the logback configuration file
    * @param properties these properties will be added to the logger context (for example `application.home`)
+   * @param levels the log levels
+   * @param mode the application mode
    * @see http://logback.qos.ch/
    */
   def configure(properties: Map[String, String] = Map.empty, levels: Map[String, ch.qos.logback.classic.Level] = Map.empty, mode: Mode.Value) {
@@ -213,25 +238,23 @@ object Logger extends LoggerLike {
         }
 
         try {
-          Option(System.getProperty("logger.resource")).map(s => if (s.startsWith("/")) s.drop(1) else s).map(r => Option(this.getClass.getClassLoader.getResource(r)).getOrElse(new java.net.URL("file:///" + System.getProperty("logger.resource")))).
-            orElse {
-              Option(System.getProperty("logger.file")).map(new java.io.File(_).toURI.toURL)
-            }.
-            orElse {
-              Option(System.getProperty("logger.url")).map(new java.net.URL(_))
-            }.
-            orElse {
-              if (mode != Mode.Test) {
-                Option(this.getClass.getClassLoader.getResource("logger.xml"))
-              } else {
-                None
+          val configResource =
+            Option(System.getProperty("logger.resource"))
+              .map(s => if (s.startsWith("/")) s.drop(1) else s)
+              .map(r => Option(this.getClass.getClassLoader.getResource(r))
+                .getOrElse(new java.net.URL("file:///" + System.getProperty("logger.resource")))
+              ).orElse {
+                Option(System.getProperty("logger.file")).map(new java.io.File(_).toURI.toURL)
+              }.orElse {
+                Option(System.getProperty("logger.url")).map(new java.net.URL(_))
+              }.orElse {
+                Option(this.getClass.getClassLoader.getResource("application-logger.xml"))
+                  .orElse(Option(this.getClass.getClassLoader.getResource("logger.xml")))
               }
-            }.
-            map { url =>
-              configurator.doConfigure(url)
-            }
+
+          configResource.foreach { url => configurator.doConfigure(url) }
         } catch {
-          case e => e.printStackTrace()
+          case NonFatal(e) => e.printStackTrace()
         }
 
         levels.foreach {
@@ -239,21 +262,21 @@ object Logger extends LoggerLike {
         }
         StatusPrinter.printIfErrorsOccured(ctx)
       } catch {
-        case _ =>
+        case NonFatal(_) =>
       }
 
     }
 
   }
 
+  /**
+   * Shutdown the logger infrastructure.
+   */
   def shutdown() {
-    import ch.qos.logback.classic.joran._
-    import ch.qos.logback.core.util._
     import ch.qos.logback.classic._
 
     val ctx = LoggerFactory.getILoggerFactory.asInstanceOf[LoggerContext]
     ctx.stop()
-
   }
 
   import ch.qos.logback.classic._
@@ -272,7 +295,7 @@ object Logger extends LoggerLike {
 
     import play.utils.Colors
 
-    def convert(event: ILoggingEvent) = {
+    def convert(event: ILoggingEvent): String = {
       event.getLevel match {
         case Level.TRACE => "[" + Colors.blue("trace") + "]"
         case Level.DEBUG => "[" + Colors.cyan("debug") + "]"

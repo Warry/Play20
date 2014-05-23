@@ -1,34 +1,34 @@
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
 package play.core.server
+
+import scala.language.postfixOps
 
 import play.api._
 import play.core._
 import play.api.mvc._
-import play.api.libs.iteratee._
-import play.api.libs.akka._
-import play.api.libs.iteratee._
-import play.api.libs.iteratee.Input._
-import play.api.libs.concurrent._
 
-import akka.actor._
-import akka.actor.Actor._
-
-import akka.routing._
-import akka.config._
+import scala.concurrent.duration._
+import scala.util.{ Try, Success, Failure }
+import scala.util.control.NonFatal
+import scala.concurrent.Future
 
 trait WebSocketable {
   def getHeader(header: String): String
   def check: Boolean
 }
 
+/**
+ * provides generic server behaviour for Play applications
+ */
 trait Server {
 
-  def mode: Mode.Mode
-
-  // First delete the default log file for a fresh start
+  // First delete the default log file for a fresh start (only in Dev Mode)
   try {
-    scalax.file.Path(new java.io.File(applicationProvider.path, "logs/application.log")).delete()
+    if (mode == Mode.Dev) new java.io.File(applicationProvider.path, "logs/application.log").delete()
   } catch {
-    case _ =>
+    case NonFatal(_) =>
   }
 
   // Configure the logger for the first time
@@ -36,37 +36,28 @@ trait Server {
     Map("application.home" -> applicationProvider.path.getAbsolutePath),
     mode = mode)
 
-  def response(webSocketableRequest: WebSocketable)(otheResults: PartialFunction[Result, Unit]) = new Response {
-
-    val websocketErrorResult: PartialFunction[Result, Unit] = { case _ if (webSocketableRequest.check) => handle(Results.BadRequest) }
-
-    val asyncResult: PartialFunction[Result, Unit] = {
-      case AsyncResult(p) => p.extend1 {
-        case Redeemed(v) => handle(v)
-        case Thrown(e) => {
-          Logger("play").error("Waiting for a promise, but got an error: " + e.getMessage, e)
-          handle(Results.InternalServerError)
-        }
-      }
-    }
-
-    def handle(result: Result) = (asyncResult orElse websocketErrorResult orElse otheResults)(result)
+  val bodyParserTimeout = {
+    //put in proper config
+    1 second
   }
 
-  val invoker = Invoker.actionInvoker
+  def mode: Mode.Mode
 
-  def getHandlerFor(request: RequestHeader): Either[Result, (Handler, Application)] = {
+  def getHandlerFor(request: RequestHeader): Either[Future[Result], (RequestHeader, Handler, Application)] = {
 
     import scala.util.control.Exception
 
-    def sendHandler: Either[Throwable, (Handler, Application)] = {
+    def sendHandler: Try[(RequestHeader, Handler, Application)] = {
       try {
-        applicationProvider.get.right.map { application =>
-          val maybeAction = application.global.onRouteRequest(request)
-          (maybeAction.getOrElse(Action(BodyParsers.parse.empty)(_ => application.global.onHandlerNotFound(request))), application)
+        applicationProvider.get.map { application =>
+          application.global.onRequestReceived(request) match {
+            case (requestHeader, handler) => (requestHeader, handler, application)
+          }
         }
       } catch {
-        case e => Left(e)
+        case e: ThreadDeath => throw e
+        case e: VirtualMachineError => throw e
+        case e: Throwable => Failure(e)
       }
     }
 
@@ -75,11 +66,11 @@ trait Server {
       Logger.error(
         """
         |
-        |! %sInternal server error, for request [%s] ->
+        |! %sInternal server error, for (%s) [%s] ->
         |""".stripMargin.format(e match {
           case p: PlayException => "@" + p.id + " - "
           case _ => ""
-        }, request),
+        }, request.method, request.uri),
         e)
 
       DefaultGlobal.onError(request, e)
@@ -87,34 +78,21 @@ trait Server {
     }
 
     Exception
-      .allCatch[Option[Result]]
-      .either(applicationProvider.handleWebCommand(request))
+      .allCatch[Option[Future[Result]]]
+      .either(applicationProvider.handleWebCommand(request).map(Future.successful))
       .left.map(logExceptionAndGetResult)
       .right.flatMap(maybeResult => maybeResult.toLeft(())).right.flatMap { _ =>
-        sendHandler.left.map(logExceptionAndGetResult)
+        sendHandler match {
+          case Failure(e) => Left(logExceptionAndGetResult(e))
+          case Success(v) => Right(v)
+        }
       }
 
-  }
-
-  def invoke[A](request: Request[A], response: Response, action: Action[A], app: Application) = {
-    invoker ! Invoker.HandleAction(request, response, action, app)
-  }
-
-  val bodyParserTimeout = {
-    import akka.util.duration._
-    Configuration(Invoker.system.settings.config).getMilliseconds("akka.actor.retrieveBodyParserTimeout").map(_ milliseconds).getOrElse(1 second)
-  }
-
-  import play.api.libs.concurrent._
-
-  def getBodyParser[A](requestHeaders: RequestHeader, bodyFunction: BodyParser[A]): Promise[Iteratee[Array[Byte], Either[Result, A]]] = {
-    (invoker ? (Invoker.GetBodyParser(requestHeaders, bodyFunction), bodyParserTimeout)).asPromise.map(_.asInstanceOf[Iteratee[Array[Byte], Either[Result, A]]])
   }
 
   def applicationProvider: ApplicationProvider
 
   def stop() {
-    Invoker.system.shutdown()
     Logger.shutdown()
   }
 

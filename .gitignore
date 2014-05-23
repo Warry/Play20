@@ -1,7 +1,7 @@
+bin/
 target/
 logs/
 repository/
-dist/
 *.lock
 *.komodoproject
 .DS_Store
@@ -16,5 +16,10 @@ RUNNING_PID
 .classpath
 .project
 .settings/
+.target/
 .cache
 *.iml
+documentation/*.pdf
+framework/test/integrationtest-java/conf/evolutions/
+generated.keystore
+generated.truststore

@@ -1,11 +1,12 @@
-package test
-
 import org.specs2.mutable._
+import org.specs2.runner._
+import org.junit.runner._
 
 import play.api.test._
 import play.api.test.Helpers._
 
-object ApplicationSpec extends Specification {
+@RunWith(classOf[JUnitRunner])
+class ApplicationSpec extends Specification {
   
   import models._
 
@@ -56,16 +57,16 @@ object ApplicationSpec extends Specification {
         status(badResult) must equalTo(BAD_REQUEST)
         
         val badDateFormat = controllers.Application.save(
-          FakeRequest().withUrlFormEncodedBody("name" -> "FooBar", "introduced" -> "badbadbad", "company" -> "1")
+          FakeRequest().withFormUrlEncodedBody("name" -> "FooBar", "introduced" -> "badbadbad", "company" -> "1")
         )
         
         status(badDateFormat) must equalTo(BAD_REQUEST)
-        contentAsString(badDateFormat) must contain("""<option value="1" selected>Apple Inc.</option>""")
-        contentAsString(badDateFormat) must contain("""<input type="text" id="introduced" name="introduced" value="badbadbad" >""")
-        contentAsString(badDateFormat) must contain("""<input type="text" id="name" name="name" value="FooBar" >""")
+        contentAsString(badDateFormat) must contain("""<option value="1" selected="selected">Apple Inc.</option>""")
+        contentAsString(badDateFormat) must contain("""<input type="text" id="introduced" name="introduced" value="badbadbad" />""")
+        contentAsString(badDateFormat) must contain("""<input type="text" id="name" name="name" value="FooBar" />""")
         
         val result = controllers.Application.save(
-          FakeRequest().withUrlFormEncodedBody("name" -> "FooBar", "introduced" -> "2011-12-24", "company" -> "1")
+          FakeRequest().withFormUrlEncodedBody("name" -> "FooBar", "introduced" -> "2011-12-24", "company" -> "1")
         )
         
         status(result) must equalTo(SEE_OTHER)

@@ -1,18 +1,24 @@
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
 package play.core.less
 
+import play.PlayExceptions.AssetCompilationException
 import java.io._
-import play.api._
 
 object LessCompiler {
+
+  val lessScript = "less-1.4.2.js"
 
   import org.mozilla.javascript._
   import org.mozilla.javascript.tools.shell._
 
-  import scala.collection.JavaConverters._
+  import sbt._
 
-  import scalax.file._
-
-  private def compiler(minify: Boolean) = {
+  /**
+   * Create a compiler.  Returns a function that can be used to compile less files.
+   */
+  private def createCompiler(minify: Boolean): File => (String, Seq[File]) = {
     val ctx = Context.enter
     val global = new Global; global.init(ctx)
     val scope = ctx.initStandardObjects(global)
@@ -51,32 +57,51 @@ object LessCompiler {
       "browser.js",
       1, null)
     ctx.evaluateReader(scope, new InputStreamReader(
-      this.getClass.getClassLoader.getResource("less-1.1.4.js").openConnection().getInputStream()),
-      "less-1.1.4.js",
+      this.getClass.getClassLoader.getResource(lessScript).openConnection().getInputStream()),
+      lessScript,
       1, null)
     ctx.evaluateString(scope,
       """
                 var compile = function(source) {
 
                     var compiled;
-                    var dependencies = [source]
+                    // Import tree context
+                    var context = [source];
+                    var dependencies = [source];
 
-                    window.less.Parser.importer = function(path, paths, fn) {
-                        var imported = LessCompiler.resolve(source, path)
-                        dependencies.push(imported)
-                        new(window.less.Parser)({optimization:3, filename:String(imported.getCanonicalPath())}).parse(String(LessCompiler.readContent(imported)), function (e,root) {
-                            fn(root)
-                            if(e instanceof Object) {
-                                throw e
-                            }
-                        })
+                    window.less.Parser.importer = function(path, paths, fn, env) {
+
+                        var imported = LessCompiler.resolve(context[context.length - 1], path);
+                        var importedName = String(imported.getCanonicalPath());
+                        try {
+                          var input = String(LessCompiler.readContent(imported));
+                        } catch (e) {
+                          return fn({ type: "File", message: "File not found: " + importedName });
+                        }
+
+                        // Store it in the contents, for error reporting
+                        env.contents[importedName] = input;
+
+                        context.push(imported);
+                        dependencies.push(imported);
+
+                        new(window.less.Parser)({
+                            optimization:3,
+                            filename:importedName,
+                            contents:env.contents,
+                            dumpLineNumbers:window.less.dumpLineNumbers
+                        }).parse(input, function (e, root) {
+                            fn(e, root, input);
+
+                            context.pop();
+                        });
                     }
 
                     new(window.less.Parser)({optimization:3, filename:String(source.getCanonicalPath())}).parse(String(LessCompiler.readContent(source)), function (e,root) {
-                        compiled = root.toCSS({compress: """ + (if (minify) "true" else "false") + """})
-                        if(e instanceof Object) {
-                            throw e
+                        if (e) {
+                            throw e;
                         }
+                        compiled = root.toCSS({compress: """ + (if (minify) "true" else "false") + """})
                     })
 
                     return {css:compiled, dependencies:dependencies}
@@ -88,21 +113,27 @@ object LessCompiler {
 
     Context.exit
 
-    (source: File) => {
-      val result = Context.call(null, compilerFunction, scope, scope, Array(source)).asInstanceOf[Scriptable]
-      val css = ScriptableObject.getProperty(result, "css").asInstanceOf[String]
-      val dependencies = ScriptableObject.getProperty(result, "dependencies").asInstanceOf[NativeArray]
+    // Since SBT executes things in parallel by default, and since the LESS compiler is stateful requiring tracking
+    // context, we need to ensure that access to the compiler is synchronized.
+    val mutex = new Object()
 
-      css -> (0 until dependencies.getLength.toInt).map(ScriptableObject.getProperty(dependencies, _) match {
-        case f: File => f
-        case o: NativeJavaObject => o.unwrap.asInstanceOf[File]
-      })
+    (source: File) => {
+      mutex.synchronized {
+        val result = Context.call(null, compilerFunction, scope, scope, Array(source)).asInstanceOf[Scriptable]
+        val css = ScriptableObject.getProperty(result, "css").toString
+        val dependencies = ScriptableObject.getProperty(result, "dependencies").asInstanceOf[NativeArray]
+
+        css -> (0 until dependencies.getLength.toInt).map(ScriptableObject.getProperty(dependencies, _) match {
+          case f: File => f.getCanonicalFile
+          case o: NativeJavaObject => o.unwrap.asInstanceOf[File].getCanonicalFile
+        })
+      }
     }
   }
 
-  private lazy val debugCompiler = compiler(false)
+  private lazy val debugCompiler = createCompiler(false)
 
-  private lazy val minCompiler = compiler(true)
+  private lazy val minCompiler = createCompiler(true)
 
   def compile(source: File): (String, Option[String], Seq[File]) = {
     try {
@@ -113,27 +144,17 @@ object LessCompiler {
       case e: JavaScriptException => {
 
         val error = e.getValue.asInstanceOf[Scriptable]
-
-        throw CompilationException(
-          ScriptableObject.getProperty(error, "message").asInstanceOf[String],
-          new File(ScriptableObject.getProperty(error, "filename").asInstanceOf[String]),
-          ScriptableObject.getProperty(error, "line").asInstanceOf[Double].intValue,
-          ScriptableObject.getProperty(error, "column").asInstanceOf[Double].intValue)
-
+        val filename = ScriptableObject.getProperty(error, "filename").toString
+        val file = new File(filename)
+        throw AssetCompilationException(Some(file),
+          ScriptableObject.getProperty(error, "message").toString,
+          Some(ScriptableObject.getProperty(error, "line").asInstanceOf[Double].intValue),
+          Some(ScriptableObject.getProperty(error, "column").asInstanceOf[Double].intValue))
       }
     }
   }
 
-  def readContent(file: File) = Path(file).slurpString.replace("\r", "")
+  def readContent(file: File) = IO.read(file).replace("\r", "")
   def resolve(originalSource: File, imported: String) = new File(originalSource.getParentFile, imported)
 
 }
-
-case class CompilationException(message: String, lessFile: File, atLine: Int, atColumn: Int) extends PlayException(
-  "Compilation error", message) with PlayException.ExceptionSource {
-  def line = Some(atLine)
-  def position = Some(atColumn)
-  def input = Some(scalax.file.Path(lessFile))
-  def sourceName = Some(lessFile.getAbsolutePath)
-}
-

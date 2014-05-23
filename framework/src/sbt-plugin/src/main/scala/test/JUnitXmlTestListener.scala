@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
+
 /**
  * From https://github.com/hydrasi/junit_xml_listener
  */
@@ -10,9 +14,10 @@ import java.io.{ StringWriter, PrintWriter, File }
 import java.net.InetAddress
 import scala.collection.mutable.ListBuffer
 import scala.xml.{ Elem, Node, XML }
-import org.scalatools.testing.{ Event => TEvent, Result => TResult, Logger => TLogger }
+import sbt.testing.{ Event => TEvent, Status => TStatus, NestedSuiteSelector, NestedTestSelector, TestSelector }
+import test.SbtOptionalThrowable
 
-import play.utils.Colors
+import play.sbtplugin.Colors
 
 /**
  * A tests listener that outputs the results it receives in junit xml
@@ -24,6 +29,23 @@ class JUnitXmlTestsListener(val outputDir: String, logger: Logger) extends Tests
   val hostname = InetAddress.getLocalHost.getHostName
   /**The dir in which we put all result files. Is equal to the given dir + "/test-reports"*/
   val targetDir = new File(outputDir + "/test-reports/")
+
+  /**
+   * We search from the bottom of the stack trace to the top, dropping elements until one of them doesn't have
+   * a package that starts with one of these prefixes.
+   */
+  val IgnoredStackTraceClasses = Seq(
+    "sbt.",
+    "com.novocode.junit.",
+    "org.junit.",
+    "java.",
+    "sun.reflect.",
+    "org.mockito."
+  )
+
+  def cleanStackTrace(stackTrace: Seq[StackTraceElement]): Seq[StackTraceElement] = {
+    stackTrace.reverse.dropWhile(e => IgnoredStackTraceClasses.exists(e.getClassName.startsWith)).reverse
+  }
 
   /**all system properties as XML*/
   val properties =
@@ -38,6 +60,27 @@ class JUnitXmlTestsListener(val outputDir: String, logger: Logger) extends Tests
         props
       }
     </properties>
+
+  /**
+   * Extract the test name from the TestEvent.
+   *
+   * I think there should be a nicer way to do this, but it doesn't look like SBT is going to give us that.
+   */
+  def testNameFromTestEvent(event: TEvent) = {
+    def dropPrefix(s: String, prefix: String) = if (s.startsWith(prefix)) {
+      s.drop(prefix.length)
+    } else {
+      s
+    }
+
+    event.selector() match {
+      case test: TestSelector => dropPrefix(test.testName(), event.fullyQualifiedName() + ".")
+      // I don't know if the events below are possible with JUnit, nor do I know exactly what to do with them.
+      case test: NestedTestSelector => dropPrefix(test.testName(), event.fullyQualifiedName() + ".")
+      case suite: NestedSuiteSelector => suite.suiteId()
+      case _ => event.fullyQualifiedName()
+    }
+  }
 
   /**
    * Gathers data for one Test Suite. We map test groups to TestSuites.
@@ -60,12 +103,23 @@ class JUnitXmlTestsListener(val outputDir: String, logger: Logger) extends Tests
       }
     }
 
-    def logEvent(e: TEvent) = {
-      e.result match {
-        case TResult.Error => logger.info(Colors.red("!") + " " + e.testName)
-        case TResult.Failure => logger.info(Colors.yellow("x") + " " + e.testName)
-        case TResult.Skipped => logger.info(Colors.yellow("o") + " " + e.testName)
-        case TResult.Success => logger.info(Colors.green("+") + " " + e.testName)
+    def logEvent(event: TEvent) = {
+
+      def logWith(color: String) = logger.info(color + " " + testNameFromTestEvent(event))
+
+      event.status match {
+        case TStatus.Error => logWith(Colors.red("!"))
+        case TStatus.Failure => logWith(Colors.yellow("x"))
+        case TStatus.Skipped => logWith(Colors.yellow("o"))
+        case TStatus.Success => logWith(Colors.green("+"))
+        case _ => ()
+      }
+
+      event.throwable match {
+        case SbtOptionalThrowable(t) =>
+          logger.error(t.toString)
+          logger.error(cleanStackTrace(t.getStackTrace).map("    at " + _).mkString("\n"))
+        case _ =>
       }
     }
 
@@ -76,9 +130,9 @@ class JUnitXmlTestsListener(val outputDir: String, logger: Logger) extends Tests
     def count(): (Int, Int, Int) = {
       var errors, failures = 0
       for (e <- events) {
-        e.result match {
-          case TResult.Error => errors += 1
-          case TResult.Failure => failures += 1
+        e.status match {
+          case TStatus.Error => errors += 1
+          case TStatus.Failure => failures += 1
           case _ =>
         }
       }
@@ -95,36 +149,6 @@ class JUnitXmlTestsListener(val outputDir: String, logger: Logger) extends Tests
 
       val (errors, failures, tests) = count()
 
-      val result = <testsuite hostname={ hostname } name={ name } tests={ tests + "" } errors={ errors + "" } failures={ failures + "" } time={ (duration / 1000.0).toString }>
-                     { properties }
-                     {
-                       for (e <- events) yield <testcase classname={ name } name={ e.testName } time={ "0.0" }>
-                                                 {
-                                                   var trace: String = if (e.error != null) {
-                                                     val stringWriter = new StringWriter()
-                                                     val writer = new PrintWriter(stringWriter)
-                                                     e.error.printStackTrace(writer)
-                                                     writer.flush()
-                                                     stringWriter.toString
-                                                   } else {
-                                                     ""
-                                                   }
-                                                   e.result match {
-                                                     case TResult.Error if (e.error != null) => <error message={ e.error.getMessage } type={ e.error.getClass.getName }>{ trace }</error>
-                                                     case TResult.Error => <error message={ "No Exception or message provided" }/>
-                                                     case TResult.Failure if (e.error != null) => <failure message={ e.error.getMessage } type={ e.error.getClass.getName }>{ trace }</failure>
-                                                     case TResult.Failure => <failure message={ "No Exception or message provided" }/>
-                                                     case TResult.Skipped => <skipped/>
-                                                     case _ => {}
-                                                   }
-                                                 }
-                                               </testcase>
-
-                     }
-                     <system-out><![CDATA[]]></system-out>
-                     <system-err><![CDATA[]]></system-err>
-                   </testsuite>
-
       if (name.endsWith("Test")) {
         logger.info("")
         logger.info("")
@@ -133,15 +157,64 @@ class JUnitXmlTestsListener(val outputDir: String, logger: Logger) extends Tests
         logger.info(Colors.blue(tests + " tests, " + failures + " failures, " + errors + " errors"))
       }
 
-      result
+      <testsuite hostname={ hostname } name={ name } tests={ tests.toString } errors={ errors.toString } failures={ failures.toString } time={ (duration / 1000.0).toString }>
+        { properties }
+        { events.map(e => formatTestCase(name, e)) }
+        <system-out>
+          <![CDATA[]]>
+        </system-out>
+        <system-err>
+          <![CDATA[]]>
+        </system-err>
+      </testsuite>
+
     }
+  }
+
+  def formatTestCase(className: String, event: TEvent) = {
+    val trace = event.throwable match {
+      case SbtOptionalThrowable(throwable) => {
+        val stringWriter = new StringWriter()
+        val writer = new PrintWriter(stringWriter)
+        throwable.printStackTrace(writer)
+        writer.flush()
+        stringWriter.toString
+      }
+      case _ => ""
+    }
+    <testcase classname={ className } name={ testNameFromTestEvent(event) } time={ "0.0" }>
+      {
+        (event.status, event.throwable) match {
+          case (TStatus.Error, SbtOptionalThrowable(throwable)) =>
+            <error message={ throwable.getMessage } type={ throwable.getClass.getName }>
+              { trace }
+            </error>
+
+          case (TStatus.Error, _) =>
+            <error message={ "No Exception or message provided" }/>
+
+          case (TStatus.Failure, SbtOptionalThrowable(throwable)) =>
+            <failure message={ throwable.getMessage } type={ throwable.getClass.getName }>
+              { trace }
+            </failure>
+
+          case (TStatus.Failure, _) =>
+            <failure message={ "No Exception or message provided" }/>
+
+          case (TStatus.Skipped, _) =>
+            <skipped/>
+
+          case _ => {}
+        }
+      }
+    </testcase>
   }
 
   /**The currently running test suite*/
   var testSuite: TestSuite = null
 
   /**Creates the output Dir*/
-  override def doInit() = { targetDir.mkdirs() }
+  override def doInit(): Unit = { targetDir.mkdirs() }
 
   /**
    * Starts a new, initially empty Suite with the given name.
@@ -199,4 +272,5 @@ class JUnitXmlTestsListener(val outputDir: String, logger: Logger) extends Tests
 
   /**Returns None*/
   override def contentLogger(test: TestDefinition): Option[ContentLogger] = None
+
 }

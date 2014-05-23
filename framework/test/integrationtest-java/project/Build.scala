@@ -1,6 +1,10 @@
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
 import sbt._
 import Keys._
-import PlayProject._
+import play.PlayJava
+import play.Play.autoImport._
 
 object ApplicationBuild extends Build {
 
@@ -8,11 +12,15 @@ object ApplicationBuild extends Build {
     val appVersion      = "1.0"
 
     val appDependencies = Seq(
-      // Add your project dependencies here,
+    	javaCore,
+    	javaEbean,
+      javaWs,
+      "org.hamcrest" % "hamcrest-all" % "1.3"
     )
 
-    val main = PlayProject(appName, appVersion, appDependencies, mainLang = JAVA).settings(
-      // Add your own project settings here
+    val main = Project(appName, file(".")).enablePlugins(PlayJava).settings(
+      version := appVersion, 
+      libraryDependencies ++= appDependencies
     )
 
 }

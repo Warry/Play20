@@ -1,11 +1,15 @@
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
 package play.api.libs
 
-import scalax.io._
-import scalax.file._
-
 import java.io._
+import play.utils.PlayIO
+import scala.io.Codec
 
-/** Files utilities. */
+/**
+ * FileSystem utilities.
+ */
 object Files {
 
   /**
@@ -17,10 +21,20 @@ object Files {
     /**
      * Clean this temporary file now.
      */
-    def clean() = {
+    def clean(): Boolean = {
       file.delete()
     }
 
+    /**
+     * Move the file.
+     */
+    def moveTo(to: File, replace: Boolean = false) {
+      Files.moveFile(file, to, replace = replace)
+    }
+
+    /**
+     * Delete this file on garbage collection.
+     */
     override def finalize {
       clean()
     }
@@ -44,18 +58,51 @@ object Files {
      * @param suffix The suffix used for the temporary file name.
      * @return A temporary file instance.
      */
-    def apply(prefix: String = "", suffix: String = "") = {
+    def apply(prefix: String = "", suffix: String = ""): TemporaryFile = {
       new TemporaryFile(File.createTempFile(prefix, suffix))
     }
 
   }
 
-  def copyFile(from: File, to: File, copyAttributes: Boolean = true, replaceExisting: Boolean = true) = {
-    Path(from).copyTo(target = Path(to), copyAttributes = copyAttributes, replaceExisting = replaceExisting)
+  /**
+   * Copy a file.
+   */
+  @deprecated("Use Java 7 Files API instead", "2.3")
+  def copyFile(from: File, to: File, replaceExisting: Boolean = true): File = {
+    if (replaceExisting || !to.exists()) {
+      val in = new FileInputStream(from).getChannel
+      try {
+        val out = new FileOutputStream(to).getChannel
+        try {
+          out.transferFrom(in, 0, in.size())
+        } finally {
+          PlayIO.closeQuietly(out)
+        }
+      } finally {
+        PlayIO.closeQuietly(in)
+      }
+    }
+
+    to
   }
 
-  def moveFile(from: File, to: File, replace: Boolean = true, atomicMove: Boolean = true) = {
-    Path(from).moveTo(target = Path(to), replace = replace, atomicMove = atomicMove)
+  /**
+   * Rename a file.
+   */
+  @deprecated("Use Java 7 Files API instead", "2.3")
+  def moveFile(from: File, to: File, replace: Boolean = true): File = {
+    if (to.exists() && replace) {
+      to.delete()
+    }
+
+    if (!to.exists()) {
+      if (!from.renameTo(to)) {
+        copyFile(from, to)
+        from.delete()
+      }
+    }
+
+    to
   }
 
   /**
@@ -64,7 +111,8 @@ object Files {
    * @param path the file to read.
    * @return the file contents
    */
-  def readFile(path: File): String = Path(path).slurpString
+  @deprecated("Use Java 7 Files API instead", "2.3")
+  def readFile(path: File): String = PlayIO.readFileAsString(path)(Codec.UTF8)
 
   /**
    * Write a file’s contents as a `String`.
@@ -72,14 +120,28 @@ object Files {
    * @param path the file to write to
    * @param content the contents to write
    */
-  def writeFile(path: File, content: String) = Path(path).write(content)
+  @deprecated("Use Java 7 Files API instead", "2.3")
+  def writeFile(path: File, content: String): Unit = {
+    path.getParentFile.mkdirs()
+    val out = new FileOutputStream(path)
+    try {
+      val writer = new OutputStreamWriter(out, Codec.UTF8.name)
+      try {
+        writer.write(content)
+      } finally PlayIO.closeQuietly(writer)
+    } finally PlayIO.closeQuietly(out)
+  }
 
   /**
    * Creates a directory.
    *
    * @param path the directory to create
    */
-  def createDirectory(path: File) = Path(path).createDirectory(failIfExists = false)
+  @deprecated("Use Java 7 Files API instead", "2.3")
+  def createDirectory(path: File): File = {
+    path.mkdirs()
+    path
+  }
 
   /**
    * Writes a file’s content as String, only touching the file if the actual file content is different.
@@ -87,6 +149,7 @@ object Files {
    * @param path the file to write to
    * @param content the contents to write
    */
+  @deprecated("Use Java 7 Files API instead", "2.3")
   def writeFileIfChanged(path: File, content: String) {
     if (content != Option(path).filter(_.exists).map(readFile(_)).getOrElse("")) {
       writeFile(path, content)

@@ -1,7 +1,7 @@
 @**
  * Prepare a generic HTML input.
  *@
-@(field: play.api.data.Field, args: (Symbol, Any)* )(inputDef: (String, String, Option[String], Map[Symbol,Any]) => Html)(implicit handler: FieldConstructor)
+@(field: play.api.data.Field, args: (Symbol, Any)* )(inputDef: (String, String, Option[String], Map[Symbol,Any]) => Html)(implicit handler: FieldConstructor, lang: play.api.i18n.Lang)
 
 @id = @{ args.toMap.get('id).map(_.toString).getOrElse(field.id) }
 
@@ -9,7 +9,8 @@
     FieldElements(
         id,
         field,
-        inputDef(id, field.name, field.value, args.filter(!_._1.name.startsWith("_")).toMap),
-        args.toMap
+        inputDef(id, field.name, field.value, args.filter(arg => !arg._1.name.startsWith("_") && arg._1 != 'id).toMap),
+        args.toMap,
+        lang
     )
 )

@@ -1,39 +1,71 @@
+/*
+ * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ */
 package play.core.jscompile
 
-import sbt.PlayExceptions.AssetCompilationException
-
+import play.PlayExceptions.AssetCompilationException
 import java.io._
 import play.api._
-
 import scala.collection.JavaConverters._
-import scala.collection.JavaConversions._
-
-import scalax.file._
-
-import com.google.javascript.rhino.Node
+import sbt._
 
 object JavascriptCompiler {
 
-  import com.google.javascript.jscomp.{ Compiler, CompilerOptions, JSSourceFile }
+  import com.google.javascript.jscomp.{ Compiler, CompilerOptions, SourceFile, CompilationLevel }
 
-  def compile(source: File): (String, Option[String], Seq[File]) = {
+  /**
+   * Compile a JS file with its dependencies
+   * @return a triple containing the original source code, the minified source code, the list of dependencies (including the input file)
+   * @param source The source
+   * @param simpleCompilerOptions user supplied simple command line parameters
+   * @param fullCompilerOptions user supplied full blown CompilerOptions instance
+   */
+  def compile(source: File, simpleCompilerOptions: Seq[String], fullCompilerOptions: Option[CompilerOptions]): (String, Option[String], Seq[File]) = {
+    import scala.util.control.Exception._
+
+    val requireJsMode = simpleCompilerOptions.contains("rjs")
+    val commonJsMode = simpleCompilerOptions.contains("commonJs") && !requireJsMode
+
+    val origin = IO.read(source)
+
+    val options = fullCompilerOptions.getOrElse {
+      val defaultOptions = new CompilerOptions()
+      defaultOptions.closurePass = true
+
+      if (commonJsMode) {
+        defaultOptions.setProcessCommonJSModules(true)
+        // The compiler always expects forward slashes even on Windows.
+        defaultOptions.setCommonJSModulePathPrefix((source.getParent + File.separator).replaceAll("\\\\", "/"))
+        defaultOptions.setManageClosureDependencies(Seq(toModuleName(source.getName)).asJava)
+      }
+
+      simpleCompilerOptions.foreach {
+        case "advancedOptimizations" => CompilationLevel.ADVANCED_OPTIMIZATIONS.setOptionsForCompilationLevel(defaultOptions)
+        case "checkCaja" => defaultOptions.setCheckCaja(true)
+        case "checkControlStructures" => defaultOptions.setCheckControlStructures(true)
+        case "checkTypes" => defaultOptions.setCheckTypes(true)
+        case "checkSymbols" => defaultOptions.setCheckSymbols(true)
+        case "ecmascript5" => defaultOptions.setLanguageIn(CompilerOptions.LanguageMode.ECMASCRIPT5)
+        case _ => Unit // Unknown option
+      }
+      defaultOptions
+    }
 
     val compiler = new Compiler()
-    val options = new CompilerOptions()
+    lazy val all = allSiblings(source)
+    // In commonJsMode, we use all JavaScript sources in the same directory for some reason.
+    // Otherwise, we only look at the current file.
+    val input = if (commonJsMode) all.map(f => SourceFile.fromFile(f)).toList else List(SourceFile.fromFile(source))
 
-    val tree = SourceTree.build(source)
-
-    val file = Path(source)
-    val jsCode = file.slurpString.replace("\r", "")
-    val extern = JSSourceFile.fromCode("externs.js", "function alert(x) {}")
-    val input = tree.dependencies.map(file => JSSourceFile.fromCode(file.getName(), SourceTree.requireRe.replaceAllIn(Path(file).slurpString, ""))).toArray
-
-    compiler.compile(extern, input, options).success match {
-      case true => (tree.fullSource, Some(compiler.toSource()), tree.dependencies)
-      case false => {
-        val error = compiler.getErrors().head
-        throw AssetCompilationException(Some(source), error.description, error.lineNumber, 0)
-      }
+    catching(classOf[Exception]).either(compiler.compile(List[SourceFile]().asJava, input.asJava, options).success) match {
+      case Right(true) => (origin, { if (!requireJsMode) Some(compiler.toSource) else None }, Nil)
+      case Right(false) =>
+        val error = compiler.getErrors.head
+        val errorFile = all.find(f => f.getAbsolutePath == error.sourceName)
+        throw AssetCompilationException(errorFile, error.description, Some(error.lineNumber), None)
+      case Left(exception) =>
+        exception.printStackTrace()
+        throw AssetCompilationException(Some(source), "Internal Closure Compiler error (see logs)", None, None)
     }
   }
 
@@ -45,58 +77,87 @@ object JavascriptCompiler {
     val compiler = new Compiler()
     val options = new CompilerOptions()
 
-    val extern = JSSourceFile.fromCode("externs.js", "function alert(x) {}")
-    val input = JSSourceFile.fromCode(name.getOrElse("unknown"), source)
+    val input = List[SourceFile](SourceFile.fromCode(name.getOrElse("unknown"), source))
 
-    compiler.compile(extern, input, options).success match {
-      case true => compiler.toSource()
-      case false => {
-        val error = compiler.getErrors().head
-        throw AssetCompilationException(None, error.description, error.lineNumber, 0)
-      }
+    compiler.compile(List[SourceFile]().asJava, input.asJava, options).success match {
+      case true => compiler.toSource
+      case false =>
+        val error = compiler.getErrors.head
+        throw AssetCompilationException(None, error.description, Some(error.lineNumber), None)
     }
+  }
 
+  case class CompilationException(message: String, jsFile: File, atLine: Option[Int]) extends PlayException.ExceptionSource(
+    "JS Compilation error", message) {
+    def line = atLine.map(_.asInstanceOf[java.lang.Integer]).orNull
+    def position = null
+    def input = IO.read(jsFile)
+    def sourceName = jsFile.getAbsolutePath
+  }
+
+  /*
+   * execute a native compiler for given command
+   */
+  def executeNativeCompiler(in: String, source: File): String = {
+    import scala.sys.process._
+    val qb = Process(in)
+    var out = List[String]()
+    var err = List[String]()
+    val exit = qb ! ProcessLogger((s) => out ::= s, (s) => err ::= s)
+    if (exit != 0) {
+      val eRegex = """.*Parse error on line (\d+):.*""".r
+      val errReverse = err.reverse
+      val r = eRegex.unapplySeq(errReverse.mkString("")).map(_.head.toInt)
+      val error = "error in: " + in + " \n" + errReverse.mkString("\n")
+
+      throw CompilationException(error, source, r)
+    }
+    out.reverse.mkString("\n")
+  }
+
+  def require(source: File): Unit = {
+    import org.mozilla.javascript._
+
+    import org.mozilla.javascript.tools.shell._
+
+    val ctx = Context.enter; ctx.setOptimizationLevel(-1)
+    val global = new Global; global.init(ctx)
+    val scope = ctx.initStandardObjects(global)
+    try {
+      val defineArguments = """arguments = ['-o', '""" + source.getAbsolutePath.replace(File.separatorChar, '/') + "']"
+      ctx.evaluateString(scope, defineArguments, null,
+        1, null)
+      ctx.evaluateReader(scope, new InputStreamReader(
+        this.getClass.getClassLoader.getResource("r.js").openConnection().getInputStream),
+        "r.js", 1, null)
+    } finally {
+      Context.exit()
+    }
+  }
+
+  /**
+   * Return all Javascript files in the same directory than the input file, or subdirectories
+   */
+  private def allSiblings(source: File): Seq[File] = allJsFilesIn(source.getParentFile)
+
+  private def allJsFilesIn(dir: File): Seq[File] = {
+    val jsFiles = dir.listFiles(new java.io.FileFilter {
+      override def accept(f: File) = f.getName.endsWith(".js")
+    })
+    val directories = dir.listFiles(new java.io.FileFilter {
+      override def accept(f: File) = f.isDirectory
+    })
+    val jsFilesChildren = directories.map(d => allJsFilesIn(d)).flatten
+    jsFiles ++ jsFilesChildren
+  }
+
+  /**
+   * Turns a filename into a JS identifier that is used for moduleNames in
+   * rewritten code. Removes leading ./, replaces / with $, removes trailing .js
+   * and replaces - with _. All moduleNames get a "module$" prefix.
+   */
+  private def toModuleName(filename: String) = {
+    "module$" + filename.replaceAll("^\\./", "").replaceAll("/", "\\$").replaceAll("\\.js$", "").replaceAll("-", "_")
   }
 
 }
-
-case class SourceTree(node: File, ancestors: Set[File] = Set(), children: List[SourceTree] = List()) {
-
-  override def toString = print()
-
-  def print(indent: String = ""): String = (indent + node.getName() + "\n" + children.mkString("\n"))
-
-  private lazy val flatDependencies: List[File] = node +: children.flatMap(_.flatDependencies)
-
-  lazy val dependencies: List[File] = flatDependencies.reverse.distinct
-
-  lazy val fullSource = dependencies.map(Path(_).slurpString).mkString("\n")
-
-}
-
-object SourceTree {
-
-  def build(root: File, ancestors: Set[File] = Set()): SourceTree = {
-    SourceTree(root, ancestors, depsFor(root).map(pair => {
-      val node = pair._1
-      val lineNo = pair._2
-      // Check for cycles
-      if (ancestors.contains(root)) throw new AssetCompilationException(Some(node), "Cycle detected in require instruction", lineNo, 0)
-      SourceTree.build(node, ancestors + root)
-    }).toList)
-  }
-
-  val requireRe = """require\(["']([\w\-\.]+)["']\)""".r
-
-  def depsFor(input: File): Iterator[(File, Int)] =
-    requireRe.findAllIn(Path(input).slurpString).matchData
-      .map(m => (m.before.toString.count(s => (s == '\n')) + 1, m.group(1)))
-      .map(pair => { // (lineNo, filename)
-        val require = new File(input.getParentFile(), pair._2 + ".js")
-        if (!require.canRead || !require.isFile)
-          throw new AssetCompilationException(Some(input), "Unable to find file " + pair._2 + ".js", pair._1, 0)
-        (require, pair._1)
-      })
-
-}
-

@@ -1,10 +1,8 @@
 package controllers;
 
-import java.util.*;
-
 import play.mvc.*;
 import play.data.*;
-import play.*;
+import static play.data.Form.*;
 
 import views.html.*;
 

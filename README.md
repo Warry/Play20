@@ -1,74 +1,23 @@
-_( Please [read this page] (https://github.com/playframework/Play20/wiki/Pullrequests) before sending pull requests )_
+## Play Framework - The High Velocity Web Framework 
 
-# Play 2.0 RC1
+The Play Framework combines productivity and performance making it easy to build scalable web applications with Java and Scala.  Play is developer friendly with a "just hit refresh" workflow and built-in testing support.  With Play, applications scale predictably due to a stateless and non-blocking architecture.  By being RESTful by default, including assets compilers, JSON & WebSocket support, Play is a perfect fit for modern web & mobile applications.
 
-Play 2.0 is a Java and Scala Web application framework (http://www.playframework.org/2.0).
+### Learn More
+- [www.playframework.com](http://www.playframework.com)
+- [Download](http://www.playframework.com/download)
+- [Install](http://www.playframework.com/documentation/latest/Installing)
+- [Get Started with Java](http://www.playframework.com/documentation/latest/JavaTodoList)
+- [Get Started with Scala](http://www.playframework.com/documentation/latest/ScalaTodoList)
+- [Build from source](http://www.playframework.com/documentation/latest/BuildingFromSource)
+- [Search or create issues](https://github.com/playframework/playframework/issues)
+- [Get help](http://stackoverflow.com/questions/tagged/playframework)
+- [Contribute](http://www.playframework.com/documentation/latest/Guidelines)
 
-## Installing
-
-For convenience, you should add the framework installation directory to your system PATH. On UNIX systems will be something like:
-
-```bash
-export PATH=$PATH:/path/to/play20
-```
-
-On windows systems you'll need to set it in the global environment variables.
-
-> If you’re on UNIX, make sure that the play script is executable (otherwise do a chmod a+x play).
-
-## Getting started
-
-Enter any existing Play 2.0 application directory and use the `play` command to launch the development console:
-
-```bash
-$ cd ~/workspace/myApplication
-$ play
-```
-
-You can also directly use `play run` to run the application:
-
-```bash
-$ cd ~/workspace/myApplication
-$ play run
-```
-
-Use `play new yourNewApplication` to create a new application:
-
-```bash
-$ cd ~/workspace
-$ play new myNewApplication
-```
-
-Once the application is created, use it as any existing application:
-
-```bash
-$ cd myNewApplication
-$ play
-```
-
-## Running the sample applications
-
-There are several samples applications included in the `samples/` directory. For example, to run the included ZenTask sample application:
-
-```bash
-$ cd ~/workspace/play2/samples/scala/zentasks/
-$ play run
-```
-> The application will be available on port 9000. On first run, it will notify you that database evolutions are required. Click "Apply this script now" and you're away! 
-
-## Documentation
-
-The temporary documentation is available at https://github.com/playframework/Play20/wiki.
-
-## Contributors
-
-Check for all contributors at https://github.com/playframework/Play20/contributors.
-
-## Licence
+### License
 
 This software is licensed under the Apache 2 license, quoted below.
 
-Copyright 2011 Zenexity (http://www.zenexity.com).
+Copyright 2013 Typesafe (http://www.typesafe.com).
 
 Licensed under the Apache License, Version 2.0 (the "License"); you may not use this project except in compliance with the License. You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0.
 

@@ -3,8 +3,6 @@ import org.junit.*;
 import java.util.*;
 
 import play.mvc.*;
-import play.test.*;
-import play.libs.F.*;
 
 import static play.test.Helpers.*;
 import static org.fest.assertions.Assertions.*;
@@ -62,19 +60,19 @@ public class FunctionalTest {
                 
                 result = callAction(
                     controllers.routes.ref.Application.save(), 
-                    fakeRequest().withUrlFormEncodedBody(data)
+                    fakeRequest().withFormUrlEncodedBody(data)
                 );
                 
                 assertThat(status(result)).isEqualTo(BAD_REQUEST);
-                assertThat(contentAsString(result)).contains("<option value=\"1\" selected>Apple Inc.</option>");
-                assertThat(contentAsString(result)).contains("<input type=\"text\" id=\"introduced\" name=\"introduced\" value=\"badbadbad\" >");
-                assertThat(contentAsString(result)).contains("<input type=\"text\" id=\"name\" name=\"name\" value=\"FooBar\" >");
+                assertThat(contentAsString(result)).contains("<option value=\"1\" selected=\"selected\">Apple Inc.</option>");
+                assertThat(contentAsString(result)).contains("<input type=\"text\" id=\"introduced\" name=\"introduced\" value=\"badbadbad\" />");
+                assertThat(contentAsString(result)).contains("<input type=\"text\" id=\"name\" name=\"name\" value=\"FooBar\" />");
                 
                 data.put("introduced", "2011-12-24");
                 
                 result = callAction(
                     controllers.routes.ref.Application.save(), 
-                    fakeRequest().withUrlFormEncodedBody(data)
+                    fakeRequest().withFormUrlEncodedBody(data)
                 );
                 
                 assertThat(status(result)).isEqualTo(SEE_OTHER);

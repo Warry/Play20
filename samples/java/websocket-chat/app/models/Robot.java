@@ -3,14 +3,11 @@ package models;
 import play.*;
 import play.mvc.*;
 import play.libs.*;
-import play.libs.F.*;
 
-import akka.util.*;
+import scala.concurrent.duration.*;
 import akka.actor.*;
-import akka.dispatch.*;
 
-import org.codehaus.jackson.*;
-import org.codehaus.jackson.node.*;
+import com.fasterxml.jackson.databind.JsonNode;
 
 import static java.util.concurrent.TimeUnit.*;
 
@@ -30,14 +27,16 @@ public class Robot {
         };
         
         // Join the room
-        chatRoom.tell(new ChatRoom.Join("Robot", robotChannel));
+        chatRoom.tell(new ChatRoom.Join("Robot", robotChannel), null);
         
         // Make the robot talk every 30 seconds
         Akka.system().scheduler().schedule(
             Duration.create(30, SECONDS),
             Duration.create(30, SECONDS),
             chatRoom,
-            new ChatRoom.Talk("Robot", "I'm still alive")
+            new ChatRoom.Talk("Robot", "I'm still alive"),
+            Akka.system().dispatcher(),
+            /** sender **/ null
         );
         
     }
